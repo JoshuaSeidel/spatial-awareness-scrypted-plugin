@@ -1,0 +1,59 @@
+{
+  "name": "@blueharford/scrypted-spatial-awareness",
+  "version": "0.1.1",
+  "description": "Cross-camera object tracking for Scrypted NVR with spatial awareness",
+  "author": "Joshua Seidel <blueharford>",
+  "license": "Apache-2.0",
+  "main": "src/main.ts",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/blueharford/spatial-awareness-scrypted-plugin"
+  },
+  "bugs": {
+    "url": "https://github.com/blueharford/spatial-awareness-scrypted-plugin/issues"
+  },
+  "homepage": "https://github.com/blueharford/spatial-awareness-scrypted-plugin#readme",
+  "scripts": {
+    "scrypted-setup-project": "node node_modules/@scrypted/sdk/bin/scrypted-setup-project.js",
+    "prescrypted-setup-project": "node node_modules/@scrypted/sdk/bin/scrypted-package-json.js",
+    "build": "node node_modules/@scrypted/sdk/bin/scrypted-webpack.js",
+    "prepublishOnly": "NODE_ENV=production node node_modules/@scrypted/sdk/bin/scrypted-webpack.js",
+    "prescrypted-vscode-launch": "node node_modules/@scrypted/sdk/bin/scrypted-webpack.js",
+    "scrypted-vscode-launch": "node node_modules/@scrypted/sdk/bin/scrypted-deploy-debug.js",
+    "scrypted-deploy-debug": "node node_modules/@scrypted/sdk/bin/scrypted-deploy-debug.js",
+    "scrypted-debug": "node node_modules/@scrypted/sdk/bin/scrypted-debug.js",
+    "scrypted-deploy": "node node_modules/@scrypted/sdk/bin/scrypted-deploy.js",
+    "scrypted-readme": "node node_modules/@scrypted/sdk/bin/scrypted-readme.js",
+    "scrypted-package-json": "node node_modules/@scrypted/sdk/bin/scrypted-package-json.js"
+  },
+  "keywords": [
+    "scrypted",
+    "plugin",
+    "tracking",
+    "cross-camera",
+    "nvr",
+    "object-detection",
+    "spatial-awareness"
+  ],
+  "scrypted": {
+    "name": "Spatial Awareness",
+    "type": "API",
+    "interfaces": [
+      "DeviceProvider",
+      "DeviceCreator",
+      "Settings",
+      "HttpRequestHandler",
+      "Readme"
+    ],
+    "realfs": true
+  },
+  "dependencies": {
+    "@scrypted/sdk": "^0.5.29",
+    "mqtt": "^5.0.0"
+  },
+  "devDependencies": {
+    "@scrypted/common": "^1.0.0",
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.0"
+  }
+}
