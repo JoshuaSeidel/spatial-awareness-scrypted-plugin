@@ -435,7 +435,7 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
     const settings = await this.storageSettings.getSettings();
 
     // Training Mode button that opens mobile-friendly training UI in modal
-    const trainingOnclickCode = `(function(){var e=document.getElementById('sa-training-modal');if(e)e.remove();var m=document.createElement('div');m.id='sa-training-modal';m.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.95);z-index:2147483647;display:flex;align-items:center;justify-content:center;';var c=document.createElement('div');c.style.cssText='width:min(420px,95vw);height:92vh;max-height:900px;background:#1a1a2e;border-radius:16px;overflow:hidden;position:relative;box-shadow:0 25px 50px rgba(0,0,0,0.5);';var b=document.createElement('button');b.innerHTML='×';b.style.cssText='position:absolute;top:10px;right:10px;z-index:2147483647;background:#e94560;color:white;border:none;width:36px;height:36px;border-radius:50%;font-size:20px;cursor:pointer;';b.onclick=function(){m.remove();};var f=document.createElement('iframe');f.src='/endpoint/@blueharford/scrypted-spatial-awareness/ui/training';f.style.cssText='width:100%;height:100%;border:none;';c.appendChild(b);c.appendChild(f);m.appendChild(c);m.onclick=function(ev){if(ev.target===m)m.remove();};document.body.appendChild(m);})()`;
+    const trainingOnclickCode = `(function(){var e=document.getElementById('sa-training-modal');if(e)e.remove();var m=document.createElement('div');m.id='sa-training-modal';m.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.85);z-index:2147483647;display:flex;align-items:center;justify-content:center;';var c=document.createElement('div');c.style.cssText='width:min(420px,95vw);height:92vh;max-height:900px;background:#121212;border-radius:8px;overflow:hidden;position:relative;box-shadow:0 8px 32px rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.1);';var b=document.createElement('button');b.innerHTML='×';b.style.cssText='position:absolute;top:8px;right:8px;z-index:2147483647;background:rgba(255,255,255,0.1);color:white;border:none;width:32px;height:32px;border-radius:4px;font-size:18px;cursor:pointer;line-height:1;';b.onclick=function(){m.remove();};var f=document.createElement('iframe');f.src='/endpoint/@blueharford/scrypted-spatial-awareness/ui/training';f.style.cssText='width:100%;height:100%;border:none;';c.appendChild(b);c.appendChild(f);m.appendChild(c);m.onclick=function(ev){if(ev.target===m)m.remove();};document.body.appendChild(m);})()`;
 
     settings.push({
       key: 'trainingMode',
@@ -444,61 +444,64 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       value: `
         <style>
           .sa-training-container {
-            padding: 20px;
-            background: linear-gradient(135deg, #16213e 0%, #1a1a2e 100%);
-            border-radius: 8px;
-            border: 1px solid rgba(16, 185, 129, 0.3);
+            padding: 16px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 4px;
+            border: 1px solid rgba(255,255,255,0.08);
           }
           .sa-training-title {
-            color: #10b981;
-            font-size: 16px;
-            font-weight: 600;
+            color: #4fc3f7;
+            font-size: 14px;
+            font-weight: 500;
             margin-bottom: 8px;
+            font-family: inherit;
           }
           .sa-training-desc {
-            color: #888;
-            margin-bottom: 15px;
-            font-size: 14px;
+            color: rgba(255,255,255,0.6);
+            margin-bottom: 12px;
+            font-size: 13px;
             line-height: 1.5;
+            font-family: inherit;
           }
           .sa-training-btn {
-            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
-            color: white;
+            background: #4fc3f7;
+            color: #000;
             border: none;
-            padding: 14px 28px;
-            border-radius: 8px;
-            font-size: 15px;
-            font-weight: 600;
+            padding: 10px 20px;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: 500;
             cursor: pointer;
             display: inline-flex;
             align-items: center;
-            gap: 10px;
-            transition: transform 0.2s, box-shadow 0.2s;
+            gap: 8px;
+            transition: background 0.2s;
+            font-family: inherit;
           }
           .sa-training-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 20px rgba(16, 185, 129, 0.4);
+            background: #81d4fa;
           }
           .sa-training-steps {
-            color: #aaa;
-            font-size: 13px;
-            margin-top: 15px;
-            padding-top: 15px;
-            border-top: 1px solid rgba(255,255,255,0.1);
+            color: rgba(255,255,255,0.5);
+            font-size: 12px;
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid rgba(255,255,255,0.05);
+            font-family: inherit;
           }
           .sa-training-steps ol {
-            margin: 8px 0 0 20px;
+            margin: 6px 0 0 16px;
             padding: 0;
           }
           .sa-training-steps li {
-            margin-bottom: 4px;
+            margin-bottom: 2px;
           }
         </style>
         <div class="sa-training-container">
-          <div class="sa-training-title">🚶 Guided Property Training</div>
+          <div class="sa-training-title">Guided Property Training</div>
           <p class="sa-training-desc">Walk your property while the system learns your camera layout, transit times, and landmarks automatically.</p>
           <button class="sa-training-btn" onclick="${trainingOnclickCode}">
-            ▶ Start Training Mode
+            Start Training Mode
           </button>
           <div class="sa-training-steps">
             <strong>How it works:</strong>
@@ -515,7 +518,7 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
     });
 
     // Topology editor button that opens modal overlay (appended to body for proper z-index)
-    const onclickCode = `(function(){var e=document.getElementById('sa-topology-modal');if(e)e.remove();var m=document.createElement('div');m.id='sa-topology-modal';m.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.9);z-index:2147483647;display:flex;align-items:center;justify-content:center;';var c=document.createElement('div');c.style.cssText='width:95vw;height:92vh;max-width:1800px;background:#1a1a2e;border-radius:12px;overflow:hidden;position:relative;box-shadow:0 25px 50px rgba(0,0,0,0.5);';var b=document.createElement('button');b.innerHTML='×';b.style.cssText='position:absolute;top:15px;right:15px;z-index:2147483647;background:#e94560;color:white;border:none;width:40px;height:40px;border-radius:50%;font-size:24px;cursor:pointer;';b.onclick=function(){m.remove();};var f=document.createElement('iframe');f.src='/endpoint/@blueharford/scrypted-spatial-awareness/ui/editor';f.style.cssText='width:100%;height:100%;border:none;';c.appendChild(b);c.appendChild(f);m.appendChild(c);m.onclick=function(ev){if(ev.target===m)m.remove();};document.body.appendChild(m);})()`;
+    const onclickCode = `(function(){var e=document.getElementById('sa-topology-modal');if(e)e.remove();var m=document.createElement('div');m.id='sa-topology-modal';m.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.85);z-index:2147483647;display:flex;align-items:center;justify-content:center;';var c=document.createElement('div');c.style.cssText='width:95vw;height:92vh;max-width:1800px;background:#121212;border-radius:8px;overflow:hidden;position:relative;box-shadow:0 8px 32px rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.1);';var b=document.createElement('button');b.innerHTML='×';b.style.cssText='position:absolute;top:8px;right:8px;z-index:2147483647;background:rgba(255,255,255,0.1);color:white;border:none;width:32px;height:32px;border-radius:4px;font-size:18px;cursor:pointer;line-height:1;';b.onclick=function(){m.remove();};var f=document.createElement('iframe');f.src='/endpoint/@blueharford/scrypted-spatial-awareness/ui/editor';f.style.cssText='width:100%;height:100%;border:none;';c.appendChild(b);c.appendChild(f);m.appendChild(c);m.onclick=function(ev){if(ev.target===m)m.remove();};document.body.appendChild(m);})()`;
 
     settings.push({
       key: 'topologyEditor',
@@ -524,39 +527,41 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       value: `
         <style>
           .sa-open-btn {
-            background: linear-gradient(135deg, #e94560 0%, #0f3460 100%);
-            color: white;
+            background: #4fc3f7;
+            color: #000;
             border: none;
-            padding: 14px 28px;
-            border-radius: 8px;
-            font-size: 15px;
-            font-weight: 600;
+            padding: 10px 20px;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: 500;
             cursor: pointer;
             display: inline-flex;
             align-items: center;
-            gap: 10px;
-            transition: transform 0.2s, box-shadow 0.2s;
+            gap: 8px;
+            transition: background 0.2s;
+            font-family: inherit;
           }
           .sa-open-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 20px rgba(233, 69, 96, 0.4);
+            background: #81d4fa;
           }
           .sa-btn-container {
-            padding: 20px;
-            background: #16213e;
-            border-radius: 8px;
+            padding: 16px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 4px;
             text-align: center;
+            border: 1px solid rgba(255,255,255,0.08);
           }
           .sa-btn-desc {
-            color: #888;
-            margin-bottom: 15px;
-            font-size: 14px;
+            color: rgba(255,255,255,0.6);
+            margin-bottom: 12px;
+            font-size: 13px;
+            font-family: inherit;
           }
         </style>
         <div class="sa-btn-container">
           <p class="sa-btn-desc">Configure camera positions, connections, and transit times</p>
           <button class="sa-open-btn" onclick="${onclickCode}">
-            <span>&#9881;</span> Open Topology Editor
+            Open Topology Editor
           </button>
         </div>
       `,

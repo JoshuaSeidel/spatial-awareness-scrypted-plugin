@@ -16,8 +16,8 @@ export const TRAINING_HTML = `<!DOCTYPE html>
     html, body { height: 100%; overflow: hidden; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-      color: #fff;
+      background: #121212;
+      color: rgba(255,255,255,0.87);
       min-height: 100vh;
       display: flex;
       flex-direction: column;
@@ -25,97 +25,96 @@ export const TRAINING_HTML = `<!DOCTYPE html>
 
     /* Header */
     .header {
-      background: rgba(0,0,0,0.3);
-      padding: 15px 20px;
+      background: rgba(255,255,255,0.03);
+      padding: 12px 16px;
       display: flex;
       justify-content: space-between;
       align-items: center;
-      border-bottom: 1px solid rgba(255,255,255,0.1);
+      border-bottom: 1px solid rgba(255,255,255,0.08);
     }
-    .header h1 { font-size: 18px; font-weight: 600; }
+    .header h1 { font-size: 16px; font-weight: 500; }
     .header-status {
       display: flex;
       align-items: center;
       gap: 8px;
-      font-size: 14px;
+      font-size: 13px;
     }
     .status-badge {
-      padding: 4px 12px;
-      border-radius: 20px;
-      font-size: 12px;
-      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 500;
       text-transform: uppercase;
     }
-    .status-badge.idle { background: #6b7280; }
-    .status-badge.active { background: #10b981; animation: pulse 2s infinite; }
-    .status-badge.paused { background: #f59e0b; }
-    .status-badge.completed { background: #3b82f6; }
-    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+    .status-badge.idle { background: rgba(255,255,255,0.1); color: rgba(255,255,255,0.6); }
+    .status-badge.active { background: #4fc3f7; color: #000; animation: pulse 2s infinite; }
+    .status-badge.paused { background: #ffb74d; color: #000; }
+    .status-badge.completed { background: #81c784; color: #000; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
 
     /* Main content area */
     .main-content {
       flex: 1;
       display: flex;
       flex-direction: column;
-      padding: 15px;
+      padding: 12px;
       overflow-y: auto;
-      gap: 15px;
+      gap: 12px;
     }
 
     /* Camera detection card */
     .detection-card {
-      background: rgba(255,255,255,0.05);
-      border-radius: 16px;
-      padding: 20px;
-      border: 2px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.03);
+      border-radius: 8px;
+      padding: 16px;
+      border: 1px solid rgba(255,255,255,0.08);
       transition: all 0.3s;
     }
     .detection-card.detecting {
-      border-color: #10b981;
-      background: rgba(16, 185, 129, 0.15);
-      box-shadow: 0 0 30px rgba(16, 185, 129, 0.3);
+      border-color: #4fc3f7;
+      background: rgba(79, 195, 247, 0.1);
     }
     .detection-card.in-transit {
-      border-color: #f59e0b;
-      background: rgba(245, 158, 11, 0.15);
+      border-color: #ffb74d;
+      background: rgba(255, 183, 77, 0.1);
     }
 
     .detection-icon {
-      width: 80px;
-      height: 80px;
-      border-radius: 50%;
-      background: rgba(255,255,255,0.1);
+      width: 64px;
+      height: 64px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.05);
       display: flex;
       align-items: center;
       justify-content: center;
-      margin: 0 auto 15px;
-      font-size: 36px;
+      margin: 0 auto 12px;
+      font-size: 28px;
     }
     .detection-card.detecting .detection-icon {
-      background: #10b981;
+      background: #4fc3f7;
       animation: detectPulse 1.5s infinite;
     }
     @keyframes detectPulse {
-      0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.5); }
-      50% { transform: scale(1.05); box-shadow: 0 0 20px 10px rgba(16, 185, 129, 0); }
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.03); }
     }
 
     .detection-title {
-      font-size: 24px;
-      font-weight: 700;
+      font-size: 18px;
+      font-weight: 500;
       text-align: center;
-      margin-bottom: 8px;
+      margin-bottom: 4px;
     }
     .detection-subtitle {
-      font-size: 14px;
-      color: rgba(255,255,255,0.6);
+      font-size: 13px;
+      color: rgba(255,255,255,0.5);
       text-align: center;
     }
     .detection-confidence {
-      margin-top: 10px;
+      margin-top: 8px;
       text-align: center;
-      font-size: 13px;
-      color: rgba(255,255,255,0.5);
+      font-size: 12px;
+      color: rgba(255,255,255,0.4);
     }
 
     /* Transit timer */
@@ -123,235 +122,241 @@ export const TRAINING_HTML = `<!DOCTYPE html>
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 10px;
-      margin-top: 15px;
-      padding: 12px;
+      gap: 8px;
+      margin-top: 12px;
+      padding: 10px;
       background: rgba(0,0,0,0.2);
-      border-radius: 10px;
+      border-radius: 6px;
     }
-    .transit-timer-icon { font-size: 20px; }
-    .transit-timer-text { font-size: 18px; font-weight: 600; }
-    .transit-timer-from { font-size: 13px; color: rgba(255,255,255,0.6); }
+    .transit-timer-icon { font-size: 18px; }
+    .transit-timer-text { font-size: 16px; font-weight: 500; }
+    .transit-timer-from { font-size: 12px; color: rgba(255,255,255,0.5); }
 
     /* Stats grid */
     .stats-grid {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
-      gap: 10px;
+      gap: 8px;
     }
     .stat-item {
-      background: rgba(255,255,255,0.05);
-      border-radius: 12px;
-      padding: 15px 10px;
+      background: rgba(255,255,255,0.03);
+      border-radius: 6px;
+      padding: 12px 8px;
       text-align: center;
+      border: 1px solid rgba(255,255,255,0.05);
     }
     .stat-value {
-      font-size: 28px;
-      font-weight: 700;
-      color: #10b981;
+      font-size: 24px;
+      font-weight: 500;
+      color: #4fc3f7;
     }
     .stat-label {
-      font-size: 11px;
-      color: rgba(255,255,255,0.5);
+      font-size: 10px;
+      color: rgba(255,255,255,0.4);
       text-transform: uppercase;
-      margin-top: 4px;
+      margin-top: 2px;
     }
 
     /* Progress bar */
     .progress-section {
-      background: rgba(255,255,255,0.05);
-      border-radius: 12px;
-      padding: 15px;
+      background: rgba(255,255,255,0.03);
+      border-radius: 6px;
+      padding: 12px;
+      border: 1px solid rgba(255,255,255,0.05);
     }
     .progress-header {
       display: flex;
       justify-content: space-between;
-      margin-bottom: 10px;
-      font-size: 14px;
+      margin-bottom: 8px;
+      font-size: 13px;
     }
     .progress-bar {
-      height: 8px;
+      height: 6px;
       background: rgba(255,255,255,0.1);
-      border-radius: 4px;
+      border-radius: 3px;
       overflow: hidden;
     }
     .progress-fill {
       height: 100%;
-      background: linear-gradient(90deg, #10b981, #3b82f6);
-      border-radius: 4px;
+      background: #4fc3f7;
+      border-radius: 3px;
       transition: width 0.5s;
     }
 
     /* Suggestions */
     .suggestions-section {
-      background: rgba(59, 130, 246, 0.15);
-      border: 1px solid rgba(59, 130, 246, 0.3);
-      border-radius: 12px;
-      padding: 15px;
+      background: rgba(79, 195, 247, 0.08);
+      border: 1px solid rgba(79, 195, 247, 0.2);
+      border-radius: 6px;
+      padding: 12px;
     }
     .suggestions-title {
-      font-size: 12px;
+      font-size: 11px;
       text-transform: uppercase;
-      color: #3b82f6;
-      margin-bottom: 8px;
-      font-weight: 600;
+      color: #4fc3f7;
+      margin-bottom: 6px;
+      font-weight: 500;
     }
     .suggestion-item {
-      font-size: 15px;
-      padding: 8px 0;
+      font-size: 13px;
+      padding: 6px 0;
       border-bottom: 1px solid rgba(255,255,255,0.05);
+      color: rgba(255,255,255,0.7);
     }
     .suggestion-item:last-child { border-bottom: none; }
     .suggestion-item::before {
       content: "→ ";
-      color: #3b82f6;
+      color: #4fc3f7;
     }
 
     /* Action buttons */
     .action-buttons {
       display: flex;
-      gap: 10px;
-      padding: 10px 0;
+      gap: 8px;
+      padding: 8px 0;
     }
     .btn {
       flex: 1;
-      padding: 18px 20px;
+      padding: 14px 16px;
       border: none;
-      border-radius: 14px;
-      font-size: 16px;
-      font-weight: 600;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 500;
       cursor: pointer;
       transition: all 0.2s;
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 8px;
+      gap: 6px;
     }
-    .btn:active { transform: scale(0.97); }
-    .btn-primary { background: #10b981; color: #fff; }
-    .btn-secondary { background: rgba(255,255,255,0.1); color: #fff; }
-    .btn-danger { background: #ef4444; color: #fff; }
-    .btn-warning { background: #f59e0b; color: #000; }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn:active { transform: scale(0.98); }
+    .btn-primary { background: #4fc3f7; color: #000; }
+    .btn-secondary { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.87); }
+    .btn-danger { background: #ef5350; color: #fff; }
+    .btn-warning { background: #ffb74d; color: #000; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
     /* Full-width button */
     .btn-full { flex: none; width: 100%; }
 
     /* Mark landmark/structure panel */
     .mark-panel {
-      background: rgba(255,255,255,0.05);
-      border-radius: 16px;
-      padding: 20px;
+      background: rgba(255,255,255,0.03);
+      border-radius: 6px;
+      padding: 16px;
+      border: 1px solid rgba(255,255,255,0.05);
     }
     .mark-panel-title {
-      font-size: 16px;
-      font-weight: 600;
-      margin-bottom: 15px;
+      font-size: 14px;
+      font-weight: 500;
+      margin-bottom: 12px;
     }
     .mark-type-grid {
       display: grid;
       grid-template-columns: repeat(4, 1fr);
-      gap: 8px;
-      margin-bottom: 15px;
+      gap: 6px;
+      margin-bottom: 12px;
     }
     .mark-type-btn {
-      padding: 12px 8px;
-      border: 2px solid rgba(255,255,255,0.1);
-      border-radius: 10px;
+      padding: 10px 6px;
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 6px;
       background: transparent;
-      color: #fff;
-      font-size: 11px;
+      color: rgba(255,255,255,0.7);
+      font-size: 10px;
       text-align: center;
       cursor: pointer;
       transition: all 0.2s;
     }
     .mark-type-btn.selected {
-      border-color: #10b981;
-      background: rgba(16, 185, 129, 0.2);
+      border-color: #4fc3f7;
+      background: rgba(79, 195, 247, 0.15);
+      color: #fff;
     }
-    .mark-type-btn .icon { font-size: 20px; margin-bottom: 4px; display: block; }
+    .mark-type-btn .icon { font-size: 18px; margin-bottom: 2px; display: block; }
 
     /* Input field */
-    .input-group { margin-bottom: 15px; }
+    .input-group { margin-bottom: 12px; }
     .input-group label {
       display: block;
-      font-size: 13px;
-      color: rgba(255,255,255,0.6);
-      margin-bottom: 6px;
+      font-size: 12px;
+      color: rgba(255,255,255,0.5);
+      margin-bottom: 4px;
     }
     .input-group input {
       width: 100%;
-      padding: 14px;
-      border: 2px solid rgba(255,255,255,0.1);
-      border-radius: 10px;
+      padding: 12px;
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 6px;
       background: rgba(0,0,0,0.2);
       color: #fff;
-      font-size: 16px;
+      font-size: 14px;
     }
     .input-group input:focus {
       outline: none;
-      border-color: #10b981;
+      border-color: #4fc3f7;
     }
 
     /* History list */
     .history-section {
-      background: rgba(255,255,255,0.05);
-      border-radius: 16px;
-      padding: 15px;
-      max-height: 200px;
+      background: rgba(255,255,255,0.03);
+      border-radius: 6px;
+      padding: 12px;
+      max-height: 180px;
       overflow-y: auto;
+      border: 1px solid rgba(255,255,255,0.05);
     }
     .history-title {
-      font-size: 14px;
-      font-weight: 600;
-      margin-bottom: 10px;
+      font-size: 13px;
+      font-weight: 500;
+      margin-bottom: 8px;
       display: flex;
       justify-content: space-between;
     }
     .history-item {
-      padding: 10px;
+      padding: 8px;
       border-bottom: 1px solid rgba(255,255,255,0.05);
-      font-size: 14px;
+      font-size: 13px;
     }
     .history-item:last-child { border-bottom: none; }
     .history-item-time {
-      font-size: 11px;
+      font-size: 10px;
       color: rgba(255,255,255,0.4);
     }
-    .history-item-camera { color: #10b981; font-weight: 600; }
-    .history-item-transit { color: #f59e0b; }
+    .history-item-camera { color: #4fc3f7; font-weight: 500; }
+    .history-item-transit { color: #ffb74d; }
 
     /* Bottom action bar */
     .bottom-bar {
-      background: rgba(0,0,0,0.3);
-      padding: 15px 20px;
-      padding-bottom: max(15px, env(safe-area-inset-bottom));
-      border-top: 1px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.03);
+      padding: 12px 16px;
+      padding-bottom: max(12px, env(safe-area-inset-bottom));
+      border-top: 1px solid rgba(255,255,255,0.08);
     }
 
     /* Tabs */
     .tabs {
       display: flex;
       background: rgba(0,0,0,0.2);
-      border-radius: 10px;
-      padding: 4px;
-      margin-bottom: 15px;
+      border-radius: 6px;
+      padding: 3px;
+      margin-bottom: 12px;
     }
     .tab {
       flex: 1;
-      padding: 12px;
+      padding: 10px;
       border: none;
       background: transparent;
       color: rgba(255,255,255,0.5);
-      font-size: 14px;
-      font-weight: 600;
+      font-size: 13px;
+      font-weight: 500;
       cursor: pointer;
-      border-radius: 8px;
+      border-radius: 4px;
       transition: all 0.2s;
     }
     .tab.active {
-      background: rgba(255,255,255,0.1);
-      color: #fff;
+      background: rgba(255,255,255,0.08);
+      color: rgba(255,255,255,0.87);
     }
 
     /* Tab content */
@@ -366,29 +371,31 @@ export const TRAINING_HTML = `<!DOCTYPE html>
       left: 0;
       right: 0;
       bottom: 0;
-      background: rgba(0,0,0,0.8);
+      background: rgba(0,0,0,0.85);
       z-index: 100;
       align-items: center;
       justify-content: center;
-      padding: 20px;
+      padding: 16px;
     }
     .modal-overlay.active { display: flex; }
     .modal {
-      background: #16213e;
-      border-radius: 16px;
-      padding: 25px;
-      max-width: 400px;
+      background: #1e1e1e;
+      border-radius: 8px;
+      padding: 20px;
+      max-width: 360px;
       width: 100%;
+      border: 1px solid rgba(255,255,255,0.1);
     }
-    .modal h2 { font-size: 20px; margin-bottom: 15px; }
+    .modal h2 { font-size: 18px; margin-bottom: 12px; font-weight: 500; }
     .modal-result-item {
       display: flex;
       justify-content: space-between;
-      padding: 10px 0;
-      border-bottom: 1px solid rgba(255,255,255,0.1);
+      padding: 8px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      font-size: 13px;
     }
-    .modal-result-value { color: #10b981; font-weight: 600; }
-    .modal-buttons { display: flex; gap: 10px; margin-top: 20px; }
+    .modal-result-value { color: #4fc3f7; font-weight: 500; }
+    .modal-buttons { display: flex; gap: 8px; margin-top: 16px; }
 
     /* Idle state */
     .idle-content {
@@ -398,41 +405,43 @@ export const TRAINING_HTML = `<!DOCTYPE html>
       align-items: center;
       justify-content: center;
       text-align: center;
-      padding: 40px 20px;
+      padding: 32px 16px;
     }
     .idle-icon {
-      font-size: 80px;
-      margin-bottom: 20px;
-      opacity: 0.8;
+      font-size: 56px;
+      margin-bottom: 16px;
+      opacity: 0.7;
     }
     .idle-title {
-      font-size: 24px;
-      font-weight: 700;
-      margin-bottom: 10px;
+      font-size: 20px;
+      font-weight: 500;
+      margin-bottom: 8px;
     }
     .idle-desc {
-      font-size: 16px;
-      color: rgba(255,255,255,0.6);
-      max-width: 300px;
+      font-size: 14px;
+      color: rgba(255,255,255,0.5);
+      max-width: 280px;
       line-height: 1.5;
     }
     .idle-instructions {
-      margin-top: 30px;
+      margin-top: 24px;
       text-align: left;
-      background: rgba(255,255,255,0.05);
-      border-radius: 12px;
-      padding: 20px;
+      background: rgba(255,255,255,0.03);
+      border-radius: 6px;
+      padding: 16px;
+      border: 1px solid rgba(255,255,255,0.05);
     }
     .idle-instructions h3 {
-      font-size: 14px;
-      margin-bottom: 12px;
-      color: #3b82f6;
+      font-size: 12px;
+      margin-bottom: 10px;
+      color: #4fc3f7;
+      font-weight: 500;
     }
     .idle-instructions ol {
-      padding-left: 20px;
-      font-size: 14px;
-      line-height: 2;
-      color: rgba(255,255,255,0.8);
+      padding-left: 18px;
+      font-size: 13px;
+      line-height: 1.8;
+      color: rgba(255,255,255,0.6);
     }
   </style>
 </head>
