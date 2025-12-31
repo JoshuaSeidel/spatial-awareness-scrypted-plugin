@@ -15,6 +15,8 @@ import sdk, {
   Readme,
 } from '@scrypted/sdk';
 import { StorageSettings } from '@scrypted/sdk/storage-settings';
+import * as fs from 'fs';
+import * as path from 'path';
 import {
   CameraTopology,
   createEmptyTopology,
@@ -35,7 +37,7 @@ import { EDITOR_HTML } from './ui/editor-html';
 import { TRAINING_HTML } from './ui/training-html';
 import { TrainingConfig, TrainingLandmark } from './models/training';
 
-const { deviceManager, systemManager } = sdk;
+const { deviceManager, systemManager, mediaManager } = sdk;
 
 const TRACKING_ZONE_PREFIX = 'tracking-zone:';
 const GLOBAL_TRACKER_ID = 'global-tracker';
@@ -1044,14 +1046,36 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
     }
   }
 
-  private handleFloorPlanRequest(request: HttpRequest, response: HttpResponse): void {
+  private async getFloorPlanPath(): Promise<string> {
+    // Use mediaManager.getFilesPath() for proper persistent storage
+    const filesPath = await mediaManager.getFilesPath();
+    this.console.log('Files path from mediaManager:', filesPath);
+    // Ensure directory exists
+    if (!fs.existsSync(filesPath)) {
+      fs.mkdirSync(filesPath, { recursive: true });
+    }
+    return path.join(filesPath, 'floorplan.jpg');
+  }
+
+  private async handleFloorPlanRequest(request: HttpRequest, response: HttpResponse): Promise<void> {
     if (request.method === 'GET') {
-      const imageData = this.storage.getItem('floorPlanImage');
-      if (imageData) {
-        response.send(JSON.stringify({ imageData }), {
-          headers: { 'Content-Type': 'application/json' },
-        });
-      } else {
+      try {
+        const floorPlanPath = await this.getFloorPlanPath();
+        this.console.log('Loading floor plan from:', floorPlanPath, 'exists:', fs.existsSync(floorPlanPath));
+        if (fs.existsSync(floorPlanPath)) {
+          const imageBuffer = fs.readFileSync(floorPlanPath);
+          const imageData = 'data:image/jpeg;base64,' + imageBuffer.toString('base64');
+          this.console.log('Floor plan loaded, size:', imageBuffer.length);
+          response.send(JSON.stringify({ imageData }), {
+            headers: { 'Content-Type': 'application/json' },
+          });
+        } else {
+          response.send(JSON.stringify({ imageData: null }), {
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+      } catch (e) {
+        this.console.error('Failed to read floor plan:', e);
         response.send(JSON.stringify({ imageData: null }), {
           headers: { 'Content-Type': 'application/json' },
         });
@@ -1059,13 +1083,23 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
     } else if (request.method === 'POST') {
       try {
         const body = JSON.parse(request.body!);
-        this.storage.setItem('floorPlanImage', body.imageData);
+        const imageData = body.imageData as string;
+
+        // Extract base64 data (remove data:image/xxx;base64, prefix)
+        const base64Data = imageData.replace(/^data:image\/\w+;base64,/, '');
+        const imageBuffer = Buffer.from(base64Data, 'base64');
+
+        const floorPlanPath = await this.getFloorPlanPath();
+        fs.writeFileSync(floorPlanPath, imageBuffer);
+
+        this.console.log('Floor plan saved to:', floorPlanPath, 'size:', imageBuffer.length);
         response.send(JSON.stringify({ success: true }), {
           headers: { 'Content-Type': 'application/json' },
         });
       } catch (e) {
-        response.send(JSON.stringify({ error: 'Invalid request body' }), {
-          code: 400,
+        this.console.error('Failed to save floor plan:', e);
+        response.send(JSON.stringify({ error: 'Failed to save floor plan' }), {
+          code: 500,
           headers: { 'Content-Type': 'application/json' },
         });
       }

@@ -342,10 +342,27 @@ export const EDITOR_HTML = `<!DOCTYPE html>
         if (response.ok) {
           topology = await response.json();
           if (!topology.drawings) topology.drawings = [];
+          // Load floor plan from separate storage (handles legacy imageData in topology too)
           if (topology.floorPlan?.imageData) {
+            // Legacy: imageData was stored in topology
             await loadFloorPlanImage(topology.floorPlan.imageData);
           } else if (topology.floorPlan?.type === 'blank') {
             blankCanvasMode = true;
+          } else {
+            // Always try to load from floor-plan endpoint (handles uploaded and missing cases)
+            try {
+              const fpResponse = await fetch('../api/floor-plan');
+              if (fpResponse.ok) {
+                const fpData = await fpResponse.json();
+                if (fpData.imageData) {
+                  await loadFloorPlanImage(fpData.imageData);
+                  // Update topology reference if not set
+                  if (!topology.floorPlan || topology.floorPlan.type !== 'uploaded') {
+                    topology.floorPlan = { type: 'uploaded', width: floorPlanImage.width, height: floorPlanImage.height };
+                  }
+                }
+              }
+            } catch (err) { console.error('Failed to load floor plan:', err); }
           }
         }
       } catch (e) { console.error('Failed to load topology:', e); }
@@ -969,16 +986,84 @@ export const EDITOR_HTML = `<!DOCTYPE html>
 
     function uploadFloorPlan() { document.getElementById('upload-modal').classList.add('active'); }
 
+    // Compress and resize image to avoid 413 errors (Scrypted has ~50KB limit)
+    function compressImage(img, maxSize = 800, quality = 0.5) {
+      return new Promise((resolve) => {
+        const canvas = document.createElement('canvas');
+        let width = img.width;
+        let height = img.height;
+
+        // Always resize to fit within maxSize
+        if (width > maxSize || height > maxSize) {
+          if (width > height) {
+            height = Math.round(height * maxSize / width);
+            width = maxSize;
+          } else {
+            width = Math.round(width * maxSize / height);
+            height = maxSize;
+          }
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+
+        // Convert to JPEG with aggressive compression
+        let compressed = canvas.toDataURL('image/jpeg', quality);
+        console.log('Compressed image from', img.width, 'x', img.height, 'to', width, 'x', height, 'size:', Math.round(compressed.length / 1024), 'KB');
+
+        // If still too large, compress more
+        let q = quality;
+        while (compressed.length > 50000 && q > 0.1) {
+          q -= 0.1;
+          compressed = canvas.toDataURL('image/jpeg', q);
+          console.log('Re-compressed at quality', q.toFixed(1), 'size:', Math.round(compressed.length / 1024), 'KB');
+        }
+
+        resolve(compressed);
+      });
+    }
+
     async function handleFloorPlanUpload(event) {
       const file = event.target.files[0];
       if (!file) return;
       const reader = new FileReader();
       reader.onload = async (e) => {
-        const imageData = e.target.result;
-        await loadFloorPlanImage(imageData);
-        topology.floorPlan = { imageData, width: floorPlanImage.width, height: floorPlanImage.height };
-        closeModal('upload-modal');
-        render();
+        const originalData = e.target.result;
+
+        // Load image to get dimensions
+        const img = new Image();
+        img.onload = async () => {
+          // Compress image to reduce size
+          const imageData = await compressImage(img);
+          await loadFloorPlanImage(imageData);
+
+          // Store floor plan separately via API
+          try {
+            setStatus('Uploading floor plan...', 'warning');
+            const response = await fetch('../api/floor-plan', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ imageData })
+            });
+            if (response.ok) {
+              setStatus('Floor plan saved', 'success');
+            } else {
+              setStatus('Failed to save floor plan: ' + response.status, 'error');
+              console.error('Floor plan upload failed:', response.status, response.statusText);
+            }
+          } catch (err) {
+            console.error('Failed to save floor plan:', err);
+            setStatus('Failed to save floor plan', 'error');
+          }
+
+          // Store reference in topology (without the large imageData)
+          topology.floorPlan = { type: 'uploaded', width: floorPlanImage.width, height: floorPlanImage.height };
+          closeModal('upload-modal');
+          render();
+        };
+        img.src = originalData;
       };
       reader.readAsDataURL(file);
     }
@@ -1138,7 +1223,7 @@ export const EDITOR_HTML = `<!DOCTYPE html>
     function updateConnectionName(id, value) { const conn = topology.connections.find(c => c.id === id); if (conn) conn.name = value; updateUI(); }
     function updateTransitTime(id, field, value) { const conn = topology.connections.find(c => c.id === id); if (conn) conn.transitTime[field] = parseInt(value) * 1000; }
     function updateConnectionBidi(id, value) { const conn = topology.connections.find(c => c.id === id); if (conn) conn.bidirectional = value; render(); }
-    function deleteCamera(id) { if (!confirm('Delete this camera?')) return; topology.cameras = topology.cameras.filter(c => c.deviceId !== id); topology.connections = topology.connections.filter(c => c.fromCameraId !== id && c.toCameraId !== id); selectedItem = null; document.getElementById('properties-panel').innerHTML = '<h3>Properties</h3><p style="color: #666;">Select a camera or connection.</p>'; updateUI(); render(); }
+    function deleteCamera(id) { if (!confirm('Delete this camera?')) return; topology.cameras = topology.cameras.filter(c => c.deviceId !== id); topology.connections = topology.connections.filter(c => c.fromCameraId !== id && c.toCameraId !== id); selectedItem = null; document.getElementById('properties-panel').innerHTML = '<h3>Properties</h3><p style="color: #666;">Select a camera or connection.</p>'; updateCameraSelects(); updateUI(); render(); }
     function deleteConnection(id) { if (!confirm('Delete this connection?')) return; topology.connections = topology.connections.filter(c => c.id !== id); selectedItem = null; document.getElementById('properties-panel').innerHTML = '<h3>Properties</h3><p style="color: #666;">Select a camera or connection.</p>'; updateUI(); render(); }
     function setTool(tool) {
       currentTool = tool;
