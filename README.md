@@ -44,26 +44,44 @@ This plugin **tracks objects across your entire camera system**, understanding t
 
 ## Features
 
+### Core Tracking
 - **Cross-Camera Tracking**: Correlate objects (people, vehicles, animals) as they move between cameras
 - **Journey History**: Complete path history for each tracked object across your property
 - **Entry/Exit Detection**: Know when objects enter or leave your property
 - **Movement Alerts**: Get notified when objects move between camera zones
-- **LLM-Enhanced Descriptions**: Rich, contextual alerts like "Man in red shirt walking from garage towards front door" (requires LLM plugin)
-- **Visual Floor Plan Editor**: Configure camera topology with an intuitive visual editor
-- **MQTT Integration**: Export tracking data to Home Assistant for automations
-- **REST API**: Query tracked objects and journeys programmatically
 - **Smart Cooldowns**: Prevent alert spam with per-object cooldowns
 - **Loitering Threshold**: Only alert after objects are visible for a configurable duration
 - **Multiple Notifiers**: Send alerts to multiple notification services simultaneously
 
-### Advanced Spatial Awareness
+### LLM-Enhanced Descriptions
+- **Rich Contextual Alerts**: Get alerts like "Man in red shirt walking from garage towards front door" (requires LLM plugin)
+- **Configurable Rate Limiting**: Prevent LLM API overload with configurable debounce intervals
+- **Automatic Fallback**: Falls back to basic notifications when LLM is slow or unavailable
+- **Configurable Timeouts**: Set maximum wait time for LLM responses
 
+### Visual Floor Plan Editor
+- **Drag-and-Drop**: Place cameras, landmarks, and connections visually
+- **Live Tracking Overlay**: See tracked objects move across your floor plan in real-time
+- **Journey Visualization**: Click any tracked object to see their complete path drawn on the floor plan
+- **Drawing Tools**: Add walls, rooms, and labels without needing an image
+
+### Spatial Intelligence
 - **Landmarks & Static Objects**: Define landmarks like mailbox, shed, driveway, deck to give the system spatial context
 - **Camera Context**: Describe where each camera is mounted and what it can see for richer descriptions
 - **Field of View Configuration**: Define camera FOV (simple angle or polygon) to understand coverage overlap
 - **RAG-Powered Reasoning**: Uses Retrieval-Augmented Generation to understand property layout for intelligent descriptions
 - **AI Landmark Suggestions**: System learns to identify landmarks from camera footage over time
 - **Spatial Relationships**: Auto-inferred relationships between cameras and landmarks based on position
+
+### Automatic Learning (NEW in v0.3.0)
+- **Transit Time Learning**: Automatically adjusts connection transit times based on observed movement patterns
+- **Connection Suggestions**: System suggests new camera connections based on observed object movements
+- **Confidence Scoring**: Suggestions include confidence scores based on consistency of observations
+- **One-Click Approval**: Accept or reject suggestions directly from the topology editor
+
+### Integrations
+- **MQTT Integration**: Export tracking data to Home Assistant for automations
+- **REST API**: Query tracked objects and journeys programmatically
 
 ## Installation
 
@@ -97,12 +115,18 @@ npm install @blueharford/scrypted-spatial-awareness
 3. **Optional - Enable LLM Descriptions**:
    - Install an LLM plugin (OpenAI, Ollama, etc.)
    - Enable "Use LLM for Rich Descriptions" in settings
+   - Configure rate limiting and fallback options
    - Get alerts like "Woman with stroller" instead of just "Person"
 
 4. **Optional - Enable MQTT**:
    - Enable MQTT integration
    - Configure broker URL and credentials
    - Use in Home Assistant automations
+
+5. **Optional - Enable Learning Features**:
+   - Enable "Learn Transit Times" to auto-adjust connection timing
+   - Enable "Suggest Camera Connections" to discover new paths
+   - Enable "Learn Landmarks from AI" for automatic landmark discovery
 
 ## How It Works
 
@@ -126,10 +150,12 @@ To prevent alert spam and reduce noise:
 ### LLM Integration
 
 When an LLM plugin is installed and enabled, the plugin will:
-1. Capture a snapshot from the camera
-2. Send it to the LLM with context about the movement
-3. Get a rich description like "Man in blue jacket" or "Black pickup truck"
-4. Include this in the notification
+1. Check rate limiting (configurable, default: 10 second minimum between calls)
+2. Capture a snapshot from the camera
+3. Send it to the LLM with context about the movement
+4. Apply timeout (configurable, default: 3 seconds) with automatic fallback
+5. Get a rich description like "Man in blue jacket" or "Black pickup truck"
+6. Include this in the notification
 
 This transforms generic alerts into contextual, actionable information.
 
@@ -144,7 +170,18 @@ This transforms generic alerts into contextual, actionable information.
 | Visual Matching | ON | Use visual embeddings for correlation |
 | Loitering Threshold | 3s | Object must be visible this long before alerting |
 | Per-Object Cooldown | 30s | Minimum time between alerts for same object |
+
+### AI & Spatial Reasoning Settings (NEW in v0.3.0)
+| Setting | Default | Description |
+|---------|---------|-------------|
 | LLM Descriptions | ON | Use LLM plugin for rich descriptions |
+| LLM Rate Limit | 10s | Minimum time between LLM API calls |
+| Fallback to Basic | ON | Use basic notifications when LLM unavailable |
+| LLM Timeout | 3s | Maximum time to wait for LLM response |
+| Learn Transit Times | ON | Auto-adjust transit times from observations |
+| Suggest Connections | ON | Suggest new camera connections |
+| Learn Landmarks | ON | Allow AI to suggest landmarks |
+| Landmark Confidence | 0.7 | Minimum confidence for landmark suggestions |
 
 ### Alert Types
 | Alert | Description | Default |
@@ -170,6 +207,7 @@ The plugin exposes a REST API via Scrypted's HTTP handler:
 |----------|--------|-------------|
 | `/api/tracked-objects` | GET | List all tracked objects |
 | `/api/journey/{id}` | GET | Get journey for specific object |
+| `/api/journey-path/{id}` | GET | Get journey path with positions for visualization |
 | `/api/topology` | GET | Get camera topology configuration |
 | `/api/topology` | PUT | Update camera topology |
 | `/api/alerts` | GET | Get recent alerts |
@@ -177,6 +215,11 @@ The plugin exposes a REST API via Scrypted's HTTP handler:
 | `/api/cameras` | GET | List available cameras |
 | `/api/floor-plan` | GET/POST | Get or upload floor plan image |
 | `/ui/editor` | GET | Visual topology editor |
+
+### Live Tracking Endpoints (NEW in v0.3.0)
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/live-tracking` | GET | Get current state of all tracked objects |
 
 ### Landmark & Spatial Reasoning Endpoints
 | Endpoint | Method | Description |
@@ -189,6 +232,13 @@ The plugin exposes a REST API via Scrypted's HTTP handler:
 | `/api/landmark-suggestions/{id}/reject` | POST | Reject an AI suggestion |
 | `/api/landmark-templates` | GET | Get landmark templates for quick setup |
 | `/api/infer-relationships` | GET | Get auto-inferred spatial relationships |
+
+### Connection Suggestion Endpoints (NEW in v0.3.0)
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/connection-suggestions` | GET | Get suggested camera connections |
+| `/api/connection-suggestions/{id}/accept` | POST | Accept a connection suggestion |
+| `/api/connection-suggestions/{id}/reject` | POST | Reject a connection suggestion |
 
 ## MQTT Topics
 
@@ -235,6 +285,30 @@ Without LLM:
 - "Person moving from Garage towards Front Door (5s transit)"
 - "Car moving from Street towards Driveway"
 - "Dog moving from Back Yard towards Side Gate"
+
+## Changelog
+
+### v0.3.0
+- **Live Tracking Overlay**: View tracked objects in real-time on the floor plan
+- **Journey Visualization**: Click any tracked object to see their complete path
+- **Transit Time Learning**: Automatically adjusts connection times based on observations
+- **Connection Suggestions**: System suggests new camera connections
+- **LLM Rate Limiting**: Configurable debounce intervals to prevent API overload
+- **LLM Fallback**: Automatic fallback to basic notifications when LLM is slow
+- **LLM Timeout**: Configurable timeout with automatic fallback
+
+### v0.2.0
+- **Landmark System**: Add landmarks for spatial context
+- **RAG Reasoning**: Context-aware movement descriptions
+- **AI Learning**: Automatic landmark suggestions
+- **Camera Context**: Rich camera descriptions for better alerts
+
+### v0.1.0
+- Initial release with cross-camera tracking
+- Entry/exit detection
+- Movement alerts
+- MQTT integration
+- Visual topology editor
 
 ## Requirements
 

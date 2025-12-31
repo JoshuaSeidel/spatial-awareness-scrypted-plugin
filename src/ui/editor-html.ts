@@ -105,6 +105,23 @@ export const EDITOR_HTML = `<!DOCTYPE html>
           </div>
           <div id="suggestions-list"></div>
         </div>
+        <div class="section" id="connection-suggestions-section" style="display: none;">
+          <div class="section-title">
+            <span>Connection Suggestions</span>
+            <button class="btn btn-small" onclick="loadConnectionSuggestions()">Refresh</button>
+          </div>
+          <div id="connection-suggestions-list"></div>
+        </div>
+        <div class="section" id="live-tracking-section">
+          <div class="section-title">
+            <span>Live Tracking</span>
+            <label class="checkbox-group" style="font-size: 11px; font-weight: normal; text-transform: none;">
+              <input type="checkbox" id="live-tracking-toggle" onchange="toggleLiveTracking(this.checked)">
+              Enable
+            </label>
+          </div>
+          <div id="live-tracking-list" style="max-height: 150px; overflow-y: auto;"></div>
+        </div>
       </div>
     </div>
     <div class="editor">
@@ -295,6 +312,12 @@ export const EDITOR_HTML = `<!DOCTYPE html>
     let availableCameras = [];
     let landmarkTemplates = [];
     let pendingSuggestions = [];
+    let connectionSuggestions = [];
+    let liveTrackingData = { objects: [], timestamp: 0 };
+    let liveTrackingEnabled = false;
+    let liveTrackingInterval = null;
+    let selectedJourneyId = null;
+    let journeyPath = null;
     let isDrawing = false;
     let drawStart = null;
     let currentDrawing = null;
@@ -307,6 +330,7 @@ export const EDITOR_HTML = `<!DOCTYPE html>
       await loadAvailableCameras();
       await loadLandmarkTemplates();
       await loadSuggestions();
+      await loadConnectionSuggestions();
       resizeCanvas();
       render();
       updateUI();
@@ -404,6 +428,132 @@ export const EDITOR_HTML = `<!DOCTYPE html>
         await loadSuggestions();
         setStatus('Suggestion rejected', 'success');
       } catch (e) { console.error('Failed to reject suggestion:', e); }
+    }
+
+    // ==================== Connection Suggestions ====================
+    async function loadConnectionSuggestions() {
+      try {
+        const response = await fetch('../api/connection-suggestions');
+        if (response.ok) {
+          const data = await response.json();
+          connectionSuggestions = data.suggestions || [];
+          updateConnectionSuggestionsUI();
+        }
+      } catch (e) { console.error('Failed to load connection suggestions:', e); }
+    }
+
+    function updateConnectionSuggestionsUI() {
+      const section = document.getElementById('connection-suggestions-section');
+      const list = document.getElementById('connection-suggestions-list');
+      if (connectionSuggestions.length === 0) {
+        section.style.display = 'none';
+        return;
+      }
+      section.style.display = 'block';
+      list.innerHTML = connectionSuggestions.map(s =>
+        '<div class="camera-item" style="display: flex; justify-content: space-between; align-items: center;">' +
+        '<div><div class="camera-name">' + s.fromCameraName + ' → ' + s.toCameraName + '</div>' +
+        '<div class="camera-info">' + Math.round(s.suggestedTransitTime.typical / 1000) + 's typical, ' +
+        Math.round(s.confidence * 100) + '% confidence</div></div>' +
+        '<div style="display: flex; gap: 5px;">' +
+        '<button class="btn btn-small btn-primary" onclick="acceptConnectionSuggestion(\\'' + s.id + '\\')">Accept</button>' +
+        '<button class="btn btn-small" onclick="rejectConnectionSuggestion(\\'' + s.id + '\\')">Reject</button>' +
+        '</div></div>'
+      ).join('');
+    }
+
+    async function acceptConnectionSuggestion(id) {
+      try {
+        const response = await fetch('../api/connection-suggestions/' + encodeURIComponent(id) + '/accept', { method: 'POST' });
+        if (response.ok) {
+          const data = await response.json();
+          if (data.connection) {
+            topology.connections.push(data.connection);
+            updateUI();
+            render();
+          }
+          await loadConnectionSuggestions();
+          setStatus('Connection accepted', 'success');
+        }
+      } catch (e) { console.error('Failed to accept connection suggestion:', e); }
+    }
+
+    async function rejectConnectionSuggestion(id) {
+      try {
+        await fetch('../api/connection-suggestions/' + encodeURIComponent(id) + '/reject', { method: 'POST' });
+        await loadConnectionSuggestions();
+        setStatus('Connection suggestion rejected', 'success');
+      } catch (e) { console.error('Failed to reject connection suggestion:', e); }
+    }
+
+    // ==================== Live Tracking ====================
+    function toggleLiveTracking(enabled) {
+      liveTrackingEnabled = enabled;
+      if (enabled) {
+        loadLiveTracking();
+        liveTrackingInterval = setInterval(loadLiveTracking, 2000); // Poll every 2 seconds
+      } else {
+        if (liveTrackingInterval) {
+          clearInterval(liveTrackingInterval);
+          liveTrackingInterval = null;
+        }
+        liveTrackingData = { objects: [], timestamp: 0 };
+        selectedJourneyId = null;
+        journeyPath = null;
+        updateLiveTrackingUI();
+        render();
+      }
+    }
+
+    async function loadLiveTracking() {
+      try {
+        const response = await fetch('../api/live-tracking');
+        if (response.ok) {
+          liveTrackingData = await response.json();
+          updateLiveTrackingUI();
+          render();
+        }
+      } catch (e) { console.error('Failed to load live tracking:', e); }
+    }
+
+    function updateLiveTrackingUI() {
+      const list = document.getElementById('live-tracking-list');
+      if (liveTrackingData.objects.length === 0) {
+        list.innerHTML = '<div style="color: #666; font-size: 12px; text-align: center; padding: 10px;">No active objects</div>';
+        return;
+      }
+      list.innerHTML = liveTrackingData.objects.map(obj => {
+        const isSelected = selectedJourneyId === obj.globalId;
+        const ageSeconds = Math.round((Date.now() - obj.lastSeen) / 1000);
+        const ageStr = ageSeconds < 60 ? ageSeconds + 's ago' : Math.round(ageSeconds / 60) + 'm ago';
+        return '<div class="camera-item' + (isSelected ? ' selected' : '') + '" ' +
+          'onclick="selectTrackedObject(\\'' + obj.globalId + '\\')" ' +
+          'style="padding: 8px; cursor: pointer;">' +
+          '<div class="camera-name" style="font-size: 12px;">' +
+          (obj.className.charAt(0).toUpperCase() + obj.className.slice(1)) +
+          (obj.label ? ' (' + obj.label + ')' : '') + '</div>' +
+          '<div class="camera-info">' + obj.lastCameraName + ' • ' + ageStr + '</div>' +
+          '</div>';
+      }).join('');
+    }
+
+    async function selectTrackedObject(globalId) {
+      if (selectedJourneyId === globalId) {
+        // Deselect
+        selectedJourneyId = null;
+        journeyPath = null;
+      } else {
+        selectedJourneyId = globalId;
+        // Load journey path
+        try {
+          const response = await fetch('../api/journey-path/' + globalId);
+          if (response.ok) {
+            journeyPath = await response.json();
+          }
+        } catch (e) { console.error('Failed to load journey path:', e); }
+      }
+      updateLiveTrackingUI();
+      render();
     }
 
     function openAddLandmarkModal() {
@@ -628,6 +778,112 @@ export const EDITOR_HTML = `<!DOCTYPE html>
       }
       for (const camera of topology.cameras) {
         if (camera.floorPlanPosition) { drawCamera(camera); }
+      }
+
+      // Draw journey path if selected
+      if (journeyPath && journeyPath.segments.length > 0) {
+        drawJourneyPath();
+      }
+
+      // Draw live tracking objects
+      if (liveTrackingEnabled && liveTrackingData.objects.length > 0) {
+        drawLiveTrackingObjects();
+      }
+    }
+
+    function drawJourneyPath() {
+      if (!journeyPath) return;
+
+      ctx.strokeStyle = '#ff6b6b';
+      ctx.lineWidth = 3;
+      ctx.setLineDash([8, 4]);
+
+      // Draw path segments
+      for (const segment of journeyPath.segments) {
+        if (segment.fromCamera.position && segment.toCamera.position) {
+          ctx.beginPath();
+          ctx.moveTo(segment.fromCamera.position.x, segment.fromCamera.position.y);
+          ctx.lineTo(segment.toCamera.position.x, segment.toCamera.position.y);
+          ctx.stroke();
+
+          // Draw timestamp indicator
+          const midX = (segment.fromCamera.position.x + segment.toCamera.position.x) / 2;
+          const midY = (segment.fromCamera.position.y + segment.toCamera.position.y) / 2;
+          ctx.fillStyle = 'rgba(255, 107, 107, 0.9)';
+          ctx.beginPath();
+          ctx.arc(midX, midY, 4, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      ctx.setLineDash([]);
+
+      // Draw current location indicator
+      if (journeyPath.currentLocation?.position) {
+        const pos = journeyPath.currentLocation.position;
+        // Pulsing dot effect
+        const pulse = (Date.now() % 1000) / 1000;
+        const radius = 10 + pulse * 5;
+        const alpha = 1 - pulse * 0.5;
+
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255, 107, 107, ' + alpha + ')';
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, 6, 0, Math.PI * 2);
+        ctx.fillStyle = '#ff6b6b';
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+    }
+
+    function drawLiveTrackingObjects() {
+      const objectColors = {
+        person: '#4caf50',
+        car: '#2196f3',
+        animal: '#ff9800',
+        default: '#9c27b0'
+      };
+
+      for (const obj of liveTrackingData.objects) {
+        if (!obj.cameraPosition) continue;
+
+        // Skip if this is the selected journey object (drawn separately with path)
+        if (obj.globalId === selectedJourneyId) continue;
+
+        const pos = obj.cameraPosition;
+        const color = objectColors[obj.className] || objectColors.default;
+        const ageSeconds = (Date.now() - obj.lastSeen) / 1000;
+
+        // Fade old objects
+        const alpha = Math.max(0.3, 1 - ageSeconds / 60);
+
+        // Draw object indicator
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, 12, 0, Math.PI * 2);
+        ctx.fillStyle = color.replace(')', ', ' + alpha + ')').replace('rgb', 'rgba');
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255, 255, 255, ' + alpha + ')';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Draw class icon
+        ctx.fillStyle = 'rgba(255, 255, 255, ' + alpha + ')';
+        ctx.font = 'bold 10px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const icon = obj.className === 'person' ? 'P' : obj.className === 'car' ? 'C' : obj.className === 'animal' ? 'A' : '?';
+        ctx.fillText(icon, pos.x, pos.y);
+
+        // Draw label below
+        if (obj.label) {
+          ctx.font = '9px sans-serif';
+          ctx.fillText(obj.label.slice(0, 10), pos.x, pos.y + 20);
+        }
       }
     }
 

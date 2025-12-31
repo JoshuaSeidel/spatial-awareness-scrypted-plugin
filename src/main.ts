@@ -115,6 +115,41 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       description: 'Use LLM plugin (if installed) to generate descriptive alerts like "Man walking from garage towards front door"',
       group: 'AI & Spatial Reasoning',
     },
+    llmDebounceInterval: {
+      title: 'LLM Rate Limit (seconds)',
+      type: 'number',
+      defaultValue: 10,
+      description: 'Minimum time between LLM calls to prevent API overload (0 = no limit)',
+      group: 'AI & Spatial Reasoning',
+    },
+    llmFallbackEnabled: {
+      title: 'Fallback to Basic Notifications',
+      type: 'boolean',
+      defaultValue: true,
+      description: 'When LLM is rate-limited or slow, fall back to basic notifications immediately',
+      group: 'AI & Spatial Reasoning',
+    },
+    llmFallbackTimeout: {
+      title: 'LLM Timeout (seconds)',
+      type: 'number',
+      defaultValue: 3,
+      description: 'Maximum time to wait for LLM response before falling back to basic notification',
+      group: 'AI & Spatial Reasoning',
+    },
+    enableTransitTimeLearning: {
+      title: 'Learn Transit Times',
+      type: 'boolean',
+      defaultValue: true,
+      description: 'Automatically adjust connection transit times based on observed movement patterns',
+      group: 'AI & Spatial Reasoning',
+    },
+    enableConnectionSuggestions: {
+      title: 'Suggest Camera Connections',
+      type: 'boolean',
+      defaultValue: true,
+      description: 'Automatically suggest new camera connections based on observed movement patterns',
+      group: 'AI & Spatial Reasoning',
+    },
     enableLandmarkLearning: {
       title: 'Learn Landmarks from AI',
       type: 'boolean',
@@ -291,6 +326,11 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       loiteringThreshold: (this.storageSettings.values.loiteringThreshold as number || 3) * 1000,
       objectAlertCooldown: (this.storageSettings.values.objectAlertCooldown as number || 30) * 1000,
       useLlmDescriptions: this.storageSettings.values.useLlmDescriptions as boolean ?? true,
+      llmDebounceInterval: (this.storageSettings.values.llmDebounceInterval as number || 10) * 1000,
+      llmFallbackEnabled: this.storageSettings.values.llmFallbackEnabled as boolean ?? true,
+      llmFallbackTimeout: (this.storageSettings.values.llmFallbackTimeout as number || 3) * 1000,
+      enableTransitTimeLearning: this.storageSettings.values.enableTransitTimeLearning as boolean ?? true,
+      enableConnectionSuggestions: this.storageSettings.values.enableConnectionSuggestions as boolean ?? true,
       enableLandmarkLearning: this.storageSettings.values.enableLandmarkLearning as boolean ?? true,
       landmarkConfidenceThreshold: this.storageSettings.values.landmarkConfidenceThreshold as number ?? 0.7,
     };
@@ -576,6 +616,11 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       key === 'loiteringThreshold' ||
       key === 'objectAlertCooldown' ||
       key === 'useLlmDescriptions' ||
+      key === 'llmDebounceInterval' ||
+      key === 'llmFallbackEnabled' ||
+      key === 'llmFallbackTimeout' ||
+      key === 'enableTransitTimeLearning' ||
+      key === 'enableConnectionSuggestions' ||
       key === 'enableLandmarkLearning' ||
       key === 'landmarkConfidenceThreshold'
     ) {
@@ -668,6 +713,29 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
         return this.handleInferRelationshipsRequest(response);
       }
 
+      // Connection suggestions
+      if (path.endsWith('/api/connection-suggestions')) {
+        return this.handleConnectionSuggestionsRequest(request, response);
+      }
+
+      if (path.match(/\/api\/connection-suggestions\/[\w->]+\/(accept|reject)$/)) {
+        const parts = path.split('/');
+        const action = parts.pop()!;
+        const suggestionId = parts.pop()!;
+        return this.handleConnectionSuggestionActionRequest(suggestionId, action, response);
+      }
+
+      // Live tracking state
+      if (path.endsWith('/api/live-tracking')) {
+        return this.handleLiveTrackingRequest(response);
+      }
+
+      // Journey visualization
+      if (path.match(/\/api\/journey-path\/[\w-]+$/)) {
+        const globalId = path.split('/').pop()!;
+        return this.handleJourneyPathRequest(globalId, response);
+      }
+
       // UI Routes
       if (path.endsWith('/ui/editor') || path.endsWith('/ui/editor/')) {
         return this.serveEditorUI(response);
@@ -680,14 +748,18 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       // Default: return info page
       response.send(JSON.stringify({
         name: 'Spatial Awareness Plugin',
-        version: '0.1.0',
+        version: '0.3.0',
         endpoints: {
           api: {
             trackedObjects: '/api/tracked-objects',
             journey: '/api/journey/{globalId}',
+            journeyPath: '/api/journey-path/{globalId}',
             topology: '/api/topology',
             alerts: '/api/alerts',
             floorPlan: '/api/floor-plan',
+            liveTracking: '/api/live-tracking',
+            connectionSuggestions: '/api/connection-suggestions',
+            landmarkSuggestions: '/api/landmark-suggestions',
           },
           ui: {
             editor: '/ui/editor',
@@ -1052,6 +1124,108 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
     }), {
       headers: { 'Content-Type': 'application/json' },
     });
+  }
+
+  private handleConnectionSuggestionsRequest(request: HttpRequest, response: HttpResponse): void {
+    if (!this.trackingEngine) {
+      response.send(JSON.stringify({ suggestions: [] }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+      return;
+    }
+
+    const suggestions = this.trackingEngine.getConnectionSuggestions();
+    response.send(JSON.stringify({
+      suggestions,
+      count: suggestions.length,
+    }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  private handleConnectionSuggestionActionRequest(
+    suggestionId: string,
+    action: string,
+    response: HttpResponse
+  ): void {
+    if (!this.trackingEngine) {
+      response.send(JSON.stringify({ error: 'Tracking engine not running' }), {
+        code: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+      return;
+    }
+
+    if (action === 'accept') {
+      const connection = this.trackingEngine.acceptConnectionSuggestion(suggestionId);
+      if (connection) {
+        // Save updated topology
+        const topology = this.trackingEngine.getTopology();
+        this.storage.setItem('topology', JSON.stringify(topology));
+
+        response.send(JSON.stringify({ success: true, connection }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      } else {
+        response.send(JSON.stringify({ error: 'Suggestion not found' }), {
+          code: 404,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+    } else if (action === 'reject') {
+      const success = this.trackingEngine.rejectConnectionSuggestion(suggestionId);
+      if (success) {
+        response.send(JSON.stringify({ success: true }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      } else {
+        response.send(JSON.stringify({ error: 'Suggestion not found' }), {
+          code: 404,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+    } else {
+      response.send(JSON.stringify({ error: 'Invalid action' }), {
+        code: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+  }
+
+  private handleLiveTrackingRequest(response: HttpResponse): void {
+    if (!this.trackingEngine) {
+      response.send(JSON.stringify({ objects: [], timestamp: Date.now() }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+      return;
+    }
+
+    const liveState = this.trackingEngine.getLiveTrackingState();
+    response.send(JSON.stringify(liveState), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  private handleJourneyPathRequest(globalId: string, response: HttpResponse): void {
+    if (!this.trackingEngine) {
+      response.send(JSON.stringify({ error: 'Tracking engine not running' }), {
+        code: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+      return;
+    }
+
+    const journeyPath = this.trackingEngine.getJourneyPath(globalId);
+    if (journeyPath) {
+      response.send(JSON.stringify(journeyPath), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } else {
+      response.send(JSON.stringify({ error: 'Object not found' }), {
+        code: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
   }
 
   private serveEditorUI(response: HttpResponse): void {

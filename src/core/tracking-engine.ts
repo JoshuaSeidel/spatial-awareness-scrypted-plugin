@@ -14,7 +14,7 @@ import sdk, {
   Camera,
   MediaObject,
 } from '@scrypted/sdk';
-import { CameraTopology, findCamera, findConnection, findConnectionsFrom, Landmark } from '../models/topology';
+import { CameraTopology, CameraConnection, findCamera, findConnection, findConnectionsFrom, Landmark } from '../models/topology';
 import {
   TrackedObject,
   ObjectSighting,
@@ -48,10 +48,41 @@ export interface TrackingEngineConfig {
   objectAlertCooldown: number;
   /** Use LLM for enhanced descriptions */
   useLlmDescriptions: boolean;
+  /** LLM rate limit interval (ms) - minimum time between LLM calls */
+  llmDebounceInterval?: number;
+  /** Whether to fall back to basic notifications when LLM is unavailable or slow */
+  llmFallbackEnabled?: boolean;
+  /** Timeout for LLM responses (ms) */
+  llmFallbackTimeout?: number;
+  /** Enable automatic transit time learning from observations */
+  enableTransitTimeLearning?: boolean;
+  /** Enable automatic camera connection suggestions */
+  enableConnectionSuggestions?: boolean;
   /** Enable landmark learning from AI */
   enableLandmarkLearning?: boolean;
   /** Minimum confidence for landmark suggestions */
   landmarkConfidenceThreshold?: number;
+}
+
+/** Observed transit time for learning */
+interface ObservedTransit {
+  fromCameraId: string;
+  toCameraId: string;
+  transitTime: number;
+  timestamp: number;
+}
+
+/** Suggested camera connection based on observed patterns */
+export interface ConnectionSuggestion {
+  id: string;
+  fromCameraId: string;
+  fromCameraName: string;
+  toCameraId: string;
+  toCameraName: string;
+  observedTransits: ObservedTransit[];
+  suggestedTransitTime: { min: number; typical: number; max: number };
+  confidence: number;
+  timestamp: number;
 }
 
 export class TrackingEngine {
@@ -69,6 +100,20 @@ export class TrackingEngine {
   private objectLastAlertTime: Map<GlobalTrackingId, number> = new Map();
   /** Callback for topology changes (e.g., landmark suggestions) */
   private onTopologyChange?: (topology: CameraTopology) => void;
+
+  // ==================== LLM Debouncing ====================
+  /** Last time LLM was called */
+  private lastLlmCallTime: number = 0;
+  /** Queue of pending LLM requests (we only keep latest) */
+  private llmDebounceTimer: NodeJS.Timeout | null = null;
+
+  // ==================== Transit Time Learning ====================
+  /** Observed transit times for learning */
+  private observedTransits: Map<string, ObservedTransit[]> = new Map();
+  /** Connection suggestions based on observed patterns */
+  private connectionSuggestions: Map<string, ConnectionSuggestion> = new Map();
+  /** Minimum observations before suggesting a connection */
+  private readonly MIN_OBSERVATIONS_FOR_SUGGESTION = 3;
 
   constructor(
     topology: CameraTopology,
@@ -232,7 +277,20 @@ export class TrackingEngine {
     this.objectLastAlertTime.set(globalId, Date.now());
   }
 
-  /** Get spatial reasoning result for movement (uses RAG + LLM) */
+  /** Check if LLM call is allowed (rate limiting) */
+  private isLlmCallAllowed(): boolean {
+    const debounceInterval = this.config.llmDebounceInterval || 0;
+    if (debounceInterval <= 0) return true;
+    const timeSinceLastCall = Date.now() - this.lastLlmCallTime;
+    return timeSinceLastCall >= debounceInterval;
+  }
+
+  /** Record that an LLM call was made */
+  private recordLlmCall(): void {
+    this.lastLlmCallTime = Date.now();
+  }
+
+  /** Get spatial reasoning result for movement (uses RAG + LLM) with debouncing and fallback */
   private async getSpatialDescription(
     tracked: TrackedObject,
     fromCameraId: string,
@@ -240,7 +298,16 @@ export class TrackingEngine {
     transitTime: number,
     currentCameraId: string
   ): Promise<SpatialReasoningResult | null> {
+    const fallbackEnabled = this.config.llmFallbackEnabled ?? true;
+    const fallbackTimeout = this.config.llmFallbackTimeout ?? 3000;
+
     try {
+      // Check rate limiting - if not allowed, return null to use basic description
+      if (!this.isLlmCallAllowed()) {
+        this.console.log('LLM rate-limited, using basic notification');
+        return null;
+      }
+
       // Get snapshot from camera for LLM analysis (if LLM is enabled)
       let mediaObject: MediaObject | undefined;
       if (this.config.useLlmDescriptions) {
@@ -250,16 +317,42 @@ export class TrackingEngine {
         }
       }
 
-      // Use spatial reasoning engine for rich context-aware description
-      const result = await this.spatialReasoning.generateMovementDescription(
-        tracked,
-        fromCameraId,
-        toCameraId,
-        transitTime,
-        mediaObject
-      );
+      // Record that we're making an LLM call
+      this.recordLlmCall();
 
-      // Optionally trigger landmark learning
+      // Use spatial reasoning engine for rich context-aware description
+      // Apply timeout if fallback is enabled
+      let result: SpatialReasoningResult;
+      if (fallbackEnabled && mediaObject) {
+        const timeoutPromise = new Promise<SpatialReasoningResult | null>((_, reject) => {
+          setTimeout(() => reject(new Error('LLM timeout')), fallbackTimeout);
+        });
+
+        const descriptionPromise = this.spatialReasoning.generateMovementDescription(
+          tracked,
+          fromCameraId,
+          toCameraId,
+          transitTime,
+          mediaObject
+        );
+
+        try {
+          result = await Promise.race([descriptionPromise, timeoutPromise]) as SpatialReasoningResult;
+        } catch (timeoutError) {
+          this.console.log('LLM timed out, using basic notification');
+          return null;
+        }
+      } else {
+        result = await this.spatialReasoning.generateMovementDescription(
+          tracked,
+          fromCameraId,
+          toCameraId,
+          transitTime,
+          mediaObject
+        );
+      }
+
+      // Optionally trigger landmark learning (background, non-blocking)
       if (this.config.enableLandmarkLearning && mediaObject) {
         this.tryLearnLandmark(currentCameraId, mediaObject, tracked.className);
       }
@@ -327,6 +420,9 @@ export class TrackingEngine {
           transitDuration,
           correlationConfidence: correlation.confidence,
         });
+
+        // Record for transit time learning
+        this.recordObservedTransit(lastSighting.cameraId, sighting.cameraId, transitDuration);
 
         this.console.log(
           `Object ${tracked.globalId.slice(0, 8)} transited: ` +
@@ -570,5 +666,275 @@ export class TrackingEngine {
   /** Get tracked object by ID */
   getTrackedObject(globalId: GlobalTrackingId): TrackedObject | undefined {
     return this.state.getObject(globalId);
+  }
+
+  // ==================== Transit Time Learning ====================
+
+  /** Record an observed transit time for learning */
+  private recordObservedTransit(
+    fromCameraId: string,
+    toCameraId: string,
+    transitTime: number
+  ): void {
+    if (!this.config.enableTransitTimeLearning) return;
+
+    const key = `${fromCameraId}->${toCameraId}`;
+    const observation: ObservedTransit = {
+      fromCameraId,
+      toCameraId,
+      transitTime,
+      timestamp: Date.now(),
+    };
+
+    // Add to observations
+    if (!this.observedTransits.has(key)) {
+      this.observedTransits.set(key, []);
+    }
+    const observations = this.observedTransits.get(key)!;
+    observations.push(observation);
+
+    // Keep only last 100 observations per connection
+    if (observations.length > 100) {
+      observations.shift();
+    }
+
+    // Check if we should update existing connection
+    const existingConnection = findConnection(this.topology, fromCameraId, toCameraId);
+    if (existingConnection) {
+      this.maybeUpdateConnectionTransitTime(existingConnection, observations);
+    } else if (this.config.enableConnectionSuggestions) {
+      // No existing connection - suggest one
+      this.maybeCreateConnectionSuggestion(fromCameraId, toCameraId, observations);
+    }
+  }
+
+  /** Update an existing connection's transit time based on observations */
+  private maybeUpdateConnectionTransitTime(
+    connection: CameraConnection,
+    observations: ObservedTransit[]
+  ): void {
+    if (observations.length < 5) return; // Need minimum observations
+
+    const times = observations.map(o => o.transitTime).sort((a, b) => a - b);
+
+    // Calculate percentiles
+    const newMin = times[Math.floor(times.length * 0.1)];
+    const newTypical = times[Math.floor(times.length * 0.5)];
+    const newMax = times[Math.floor(times.length * 0.9)];
+
+    // Only update if significantly different (>20% change)
+    const currentTypical = connection.transitTime.typical;
+    const percentChange = Math.abs(newTypical - currentTypical) / currentTypical;
+
+    if (percentChange > 0.2 && observations.length >= 10) {
+      this.console.log(
+        `Updating transit time for ${connection.name}: ` +
+        `${Math.round(currentTypical / 1000)}s → ${Math.round(newTypical / 1000)}s (based on ${observations.length} observations)`
+      );
+
+      connection.transitTime = {
+        min: newMin,
+        typical: newTypical,
+        max: newMax,
+      };
+
+      // Notify about topology change
+      if (this.onTopologyChange) {
+        this.onTopologyChange(this.topology);
+      }
+    }
+  }
+
+  /** Create or update a connection suggestion based on observations */
+  private maybeCreateConnectionSuggestion(
+    fromCameraId: string,
+    toCameraId: string,
+    observations: ObservedTransit[]
+  ): void {
+    if (observations.length < this.MIN_OBSERVATIONS_FOR_SUGGESTION) return;
+
+    const fromCamera = findCamera(this.topology, fromCameraId);
+    const toCamera = findCamera(this.topology, toCameraId);
+    if (!fromCamera || !toCamera) return;
+
+    const key = `${fromCameraId}->${toCameraId}`;
+    const times = observations.map(o => o.transitTime).sort((a, b) => a - b);
+
+    // Calculate transit time suggestion
+    const suggestedMin = times[Math.floor(times.length * 0.1)] || times[0];
+    const suggestedTypical = times[Math.floor(times.length * 0.5)] || times[0];
+    const suggestedMax = times[Math.floor(times.length * 0.9)] || times[times.length - 1];
+
+    // Calculate confidence based on consistency and count
+    const avgTime = times.reduce((a, b) => a + b, 0) / times.length;
+    const variance = times.reduce((sum, t) => sum + Math.pow(t - avgTime, 2), 0) / times.length;
+    const stdDev = Math.sqrt(variance);
+    const coefficientOfVariation = stdDev / avgTime;
+
+    // Higher confidence with more observations and lower variance
+    const countFactor = Math.min(observations.length / 10, 1);
+    const consistencyFactor = Math.max(0, 1 - coefficientOfVariation);
+    const confidence = (countFactor * 0.6 + consistencyFactor * 0.4);
+
+    const suggestion: ConnectionSuggestion = {
+      id: `suggest_${key}`,
+      fromCameraId,
+      fromCameraName: fromCamera.name,
+      toCameraId,
+      toCameraName: toCamera.name,
+      observedTransits: observations.slice(-10), // Keep last 10
+      suggestedTransitTime: {
+        min: suggestedMin,
+        typical: suggestedTypical,
+        max: suggestedMax,
+      },
+      confidence,
+      timestamp: Date.now(),
+    };
+
+    this.connectionSuggestions.set(key, suggestion);
+
+    if (observations.length === this.MIN_OBSERVATIONS_FOR_SUGGESTION) {
+      this.console.log(
+        `New connection suggested: ${fromCamera.name} → ${toCamera.name} ` +
+        `(typical: ${Math.round(suggestedTypical / 1000)}s, confidence: ${Math.round(confidence * 100)}%)`
+      );
+    }
+  }
+
+  /** Get pending connection suggestions */
+  getConnectionSuggestions(): ConnectionSuggestion[] {
+    return Array.from(this.connectionSuggestions.values())
+      .filter(s => s.confidence >= 0.5) // Only suggest with reasonable confidence
+      .sort((a, b) => b.confidence - a.confidence);
+  }
+
+  /** Accept a connection suggestion, adding it to topology */
+  acceptConnectionSuggestion(suggestionId: string): CameraConnection | null {
+    const key = suggestionId.replace('suggest_', '');
+    const suggestion = this.connectionSuggestions.get(key);
+    if (!suggestion) return null;
+
+    const fromCamera = findCamera(this.topology, suggestion.fromCameraId);
+    const toCamera = findCamera(this.topology, suggestion.toCameraId);
+    if (!fromCamera || !toCamera) return null;
+
+    const connection: CameraConnection = {
+      id: `conn-${Date.now()}`,
+      fromCameraId: suggestion.fromCameraId,
+      toCameraId: suggestion.toCameraId,
+      name: `${fromCamera.name} to ${toCamera.name}`,
+      exitZone: [],
+      entryZone: [],
+      transitTime: suggestion.suggestedTransitTime,
+      bidirectional: true, // Default to bidirectional
+    };
+
+    this.topology.connections.push(connection);
+    this.connectionSuggestions.delete(key);
+
+    // Notify about topology change
+    if (this.onTopologyChange) {
+      this.onTopologyChange(this.topology);
+    }
+
+    this.console.log(`Connection accepted: ${connection.name}`);
+    return connection;
+  }
+
+  /** Reject a connection suggestion */
+  rejectConnectionSuggestion(suggestionId: string): boolean {
+    const key = suggestionId.replace('suggest_', '');
+    if (!this.connectionSuggestions.has(key)) return false;
+    this.connectionSuggestions.delete(key);
+    // Also clear observations so it doesn't get re-suggested immediately
+    this.observedTransits.delete(key);
+    return true;
+  }
+
+  // ==================== Live Tracking State ====================
+
+  /** Get current state of all tracked objects for live overlay */
+  getLiveTrackingState(): {
+    objects: Array<{
+      globalId: string;
+      className: string;
+      label?: string;
+      lastCameraId: string;
+      lastCameraName: string;
+      lastSeen: number;
+      state: string;
+      cameraPosition?: { x: number; y: number };
+    }>;
+    timestamp: number;
+  } {
+    const activeObjects = this.state.getActiveObjects();
+    const objects = activeObjects.map(tracked => {
+      const lastSighting = getLastSighting(tracked);
+      const camera = lastSighting ? findCamera(this.topology, lastSighting.cameraId) : null;
+
+      return {
+        globalId: tracked.globalId,
+        className: tracked.className,
+        label: tracked.label,
+        lastCameraId: lastSighting?.cameraId || '',
+        lastCameraName: lastSighting?.cameraName || '',
+        lastSeen: tracked.lastSeen,
+        state: tracked.state,
+        cameraPosition: camera?.floorPlanPosition,
+      };
+    });
+
+    return {
+      objects,
+      timestamp: Date.now(),
+    };
+  }
+
+  /** Get journey path for visualization */
+  getJourneyPath(globalId: GlobalTrackingId): {
+    segments: Array<{
+      fromCamera: { id: string; name: string; position?: { x: number; y: number } };
+      toCamera: { id: string; name: string; position?: { x: number; y: number } };
+      transitTime: number;
+      timestamp: number;
+    }>;
+    currentLocation?: { cameraId: string; cameraName: string; position?: { x: number; y: number } };
+  } | null {
+    const tracked = this.state.getObject(globalId);
+    if (!tracked) return null;
+
+    const segments = tracked.journey.map(j => {
+      const fromCamera = findCamera(this.topology, j.fromCameraId);
+      const toCamera = findCamera(this.topology, j.toCameraId);
+
+      return {
+        fromCamera: {
+          id: j.fromCameraId,
+          name: j.fromCameraName,
+          position: fromCamera?.floorPlanPosition,
+        },
+        toCamera: {
+          id: j.toCameraId,
+          name: j.toCameraName,
+          position: toCamera?.floorPlanPosition,
+        },
+        transitTime: j.transitDuration,
+        timestamp: j.entryTime,
+      };
+    });
+
+    const lastSighting = getLastSighting(tracked);
+    let currentLocation;
+    if (lastSighting) {
+      const camera = findCamera(this.topology, lastSighting.cameraId);
+      currentLocation = {
+        cameraId: lastSighting.cameraId,
+        cameraName: lastSighting.cameraName,
+        position: camera?.floorPlanPosition,
+      };
+    }
+
+    return { segments, currentLocation };
   }
 }
