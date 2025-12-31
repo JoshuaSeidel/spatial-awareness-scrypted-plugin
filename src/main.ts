@@ -32,6 +32,8 @@ import { GlobalTrackerSensor } from './devices/global-tracker-sensor';
 import { TrackingZone } from './devices/tracking-zone';
 import { MqttPublisher, MqttConfig } from './integrations/mqtt-publisher';
 import { EDITOR_HTML } from './ui/editor-html';
+import { TRAINING_HTML } from './ui/training-html';
+import { TrainingConfig, TrainingLandmark } from './models/training';
 
 const { deviceManager, systemManager } = sdk;
 
@@ -736,9 +738,36 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
         return this.handleJourneyPathRequest(globalId, response);
       }
 
+      // Training Mode endpoints
+      if (path.endsWith('/api/training/start')) {
+        return this.handleTrainingStartRequest(request, response);
+      }
+      if (path.endsWith('/api/training/pause')) {
+        return this.handleTrainingPauseRequest(response);
+      }
+      if (path.endsWith('/api/training/resume')) {
+        return this.handleTrainingResumeRequest(response);
+      }
+      if (path.endsWith('/api/training/end')) {
+        return this.handleTrainingEndRequest(response);
+      }
+      if (path.endsWith('/api/training/status')) {
+        return this.handleTrainingStatusRequest(response);
+      }
+      if (path.endsWith('/api/training/landmark')) {
+        return this.handleTrainingLandmarkRequest(request, response);
+      }
+      if (path.endsWith('/api/training/apply')) {
+        return this.handleTrainingApplyRequest(response);
+      }
+
       // UI Routes
       if (path.endsWith('/ui/editor') || path.endsWith('/ui/editor/')) {
         return this.serveEditorUI(response);
+      }
+
+      if (path.endsWith('/ui/training') || path.endsWith('/ui/training/')) {
+        return this.serveTrainingUI(response);
       }
 
       if (path.includes('/ui/')) {
@@ -748,7 +777,7 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       // Default: return info page
       response.send(JSON.stringify({
         name: 'Spatial Awareness Plugin',
-        version: '0.3.0',
+        version: '0.4.0',
         endpoints: {
           api: {
             trackedObjects: '/api/tracked-objects',
@@ -760,9 +789,19 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
             liveTracking: '/api/live-tracking',
             connectionSuggestions: '/api/connection-suggestions',
             landmarkSuggestions: '/api/landmark-suggestions',
+            training: {
+              start: '/api/training/start',
+              pause: '/api/training/pause',
+              resume: '/api/training/resume',
+              end: '/api/training/end',
+              status: '/api/training/status',
+              landmark: '/api/training/landmark',
+              apply: '/api/training/apply',
+            },
           },
           ui: {
             editor: '/ui/editor',
+            training: '/ui/training',
           },
         },
       }), {
@@ -1228,8 +1267,183 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
     }
   }
 
+  // ==================== Training Mode Handlers ====================
+
+  private handleTrainingStartRequest(request: HttpRequest, response: HttpResponse): void {
+    if (!this.trackingEngine) {
+      response.send(JSON.stringify({ error: 'Tracking engine not running. Configure topology first.' }), {
+        code: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+      return;
+    }
+
+    try {
+      let config: Partial<TrainingConfig> | undefined;
+      let trainerName: string | undefined;
+
+      if (request.body) {
+        const body = JSON.parse(request.body);
+        trainerName = body.trainerName;
+        config = body.config;
+      }
+
+      const session = this.trackingEngine.startTrainingSession(trainerName, config);
+      response.send(JSON.stringify(session), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } catch (e) {
+      response.send(JSON.stringify({ error: (e as Error).message }), {
+        code: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+  }
+
+  private handleTrainingPauseRequest(response: HttpResponse): void {
+    if (!this.trackingEngine) {
+      response.send(JSON.stringify({ error: 'Tracking engine not running' }), {
+        code: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+      return;
+    }
+
+    const success = this.trackingEngine.pauseTrainingSession();
+    if (success) {
+      response.send(JSON.stringify({ success: true }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } else {
+      response.send(JSON.stringify({ error: 'No active training session to pause' }), {
+        code: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+  }
+
+  private handleTrainingResumeRequest(response: HttpResponse): void {
+    if (!this.trackingEngine) {
+      response.send(JSON.stringify({ error: 'Tracking engine not running' }), {
+        code: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+      return;
+    }
+
+    const success = this.trackingEngine.resumeTrainingSession();
+    if (success) {
+      response.send(JSON.stringify({ success: true }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } else {
+      response.send(JSON.stringify({ error: 'No paused training session to resume' }), {
+        code: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+  }
+
+  private handleTrainingEndRequest(response: HttpResponse): void {
+    if (!this.trackingEngine) {
+      response.send(JSON.stringify({ error: 'Tracking engine not running' }), {
+        code: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+      return;
+    }
+
+    const session = this.trackingEngine.endTrainingSession();
+    if (session) {
+      response.send(JSON.stringify(session), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } else {
+      response.send(JSON.stringify({ error: 'No training session to end' }), {
+        code: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+  }
+
+  private handleTrainingStatusRequest(response: HttpResponse): void {
+    if (!this.trackingEngine) {
+      response.send(JSON.stringify({ state: 'idle', stats: null }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+      return;
+    }
+
+    const status = this.trackingEngine.getTrainingStatus();
+    if (status) {
+      response.send(JSON.stringify(status), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } else {
+      response.send(JSON.stringify({ state: 'idle', stats: null }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+  }
+
+  private handleTrainingLandmarkRequest(request: HttpRequest, response: HttpResponse): void {
+    if (!this.trackingEngine) {
+      response.send(JSON.stringify({ error: 'Tracking engine not running' }), {
+        code: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+      return;
+    }
+
+    try {
+      const body = JSON.parse(request.body!) as Omit<TrainingLandmark, 'id' | 'markedAt'>;
+      const landmark = this.trackingEngine.markTrainingLandmark(body);
+      if (landmark) {
+        response.send(JSON.stringify({ success: true, landmark }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      } else {
+        response.send(JSON.stringify({ error: 'No active training session' }), {
+          code: 400,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+    } catch (e) {
+      response.send(JSON.stringify({ error: 'Invalid request body' }), {
+        code: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+  }
+
+  private handleTrainingApplyRequest(response: HttpResponse): void {
+    if (!this.trackingEngine) {
+      response.send(JSON.stringify({ error: 'Tracking engine not running' }), {
+        code: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+      return;
+    }
+
+    const result = this.trackingEngine.applyTrainingToTopology();
+    if (result.success) {
+      // Save the updated topology
+      const topology = this.trackingEngine.getTopology();
+      this.storage.setItem('topology', JSON.stringify(topology));
+    }
+    response.send(JSON.stringify(result), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
   private serveEditorUI(response: HttpResponse): void {
     response.send(EDITOR_HTML, {
+      headers: { 'Content-Type': 'text/html' },
+    });
+  }
+
+  private serveTrainingUI(response: HttpResponse): void {
+    response.send(TRAINING_HTML, {
       headers: { 'Content-Type': 'text/html' },
     });
   }

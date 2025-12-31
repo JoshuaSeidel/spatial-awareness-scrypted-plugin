@@ -14,7 +14,7 @@ import sdk, {
   Camera,
   MediaObject,
 } from '@scrypted/sdk';
-import { CameraTopology, CameraConnection, findCamera, findConnection, findConnectionsFrom, Landmark } from '../models/topology';
+import { CameraTopology, CameraConnection, CameraNode, CameraZoneMapping, LandmarkType, findCamera, findConnection, findConnectionsFrom, Landmark } from '../models/topology';
 import {
   TrackedObject,
   ObjectSighting,
@@ -22,6 +22,21 @@ import {
   CorrelationCandidate,
   getLastSighting,
 } from '../models/tracked-object';
+import {
+  TrainingSession,
+  TrainingSessionState,
+  TrainingCameraVisit,
+  TrainingTransit,
+  TrainingLandmark,
+  TrainingOverlap,
+  TrainingStructure,
+  TrainingConfig,
+  TrainingStatusUpdate,
+  TrainingApplicationResult,
+  DEFAULT_TRAINING_CONFIG,
+  createTrainingSession,
+  calculateTrainingStats,
+} from '../models/training';
 import { TrackingState } from '../state/tracking-state';
 import { AlertManager } from '../alerts/alert-manager';
 import { ObjectCorrelator } from './object-correlator';
@@ -114,6 +129,14 @@ export class TrackingEngine {
   private connectionSuggestions: Map<string, ConnectionSuggestion> = new Map();
   /** Minimum observations before suggesting a connection */
   private readonly MIN_OBSERVATIONS_FOR_SUGGESTION = 3;
+
+  // ==================== Training Mode ====================
+  /** Current training session (null if not training) */
+  private trainingSession: TrainingSession | null = null;
+  /** Training configuration */
+  private trainingConfig: TrainingConfig = DEFAULT_TRAINING_CONFIG;
+  /** Callback for training status updates */
+  private onTrainingStatusUpdate?: (status: TrainingStatusUpdate) => void;
 
   constructor(
     topology: CameraTopology,
@@ -233,6 +256,11 @@ export class TrackingEngine {
     for (const detection of detected.detections) {
       // Skip low-confidence detections
       if (detection.score < 0.5) continue;
+
+      // If in training mode, record trainer detections
+      if (this.isTrainingActive() && detection.className === 'person') {
+        this.recordTrainerDetection(cameraId, detection, detection.score);
+      }
 
       // Skip classes we're not tracking on this camera
       if (camera.trackClasses.length > 0 &&
@@ -936,5 +964,564 @@ export class TrackingEngine {
     }
 
     return { segments, currentLocation };
+  }
+
+  // ==================== Training Mode Methods ====================
+
+  /** Set callback for training status updates */
+  setTrainingStatusCallback(callback: (status: TrainingStatusUpdate) => void): void {
+    this.onTrainingStatusUpdate = callback;
+  }
+
+  /** Get current training session (if any) */
+  getTrainingSession(): TrainingSession | null {
+    return this.trainingSession;
+  }
+
+  /** Check if training mode is active */
+  isTrainingActive(): boolean {
+    return this.trainingSession !== null && this.trainingSession.state === 'active';
+  }
+
+  /** Start a new training session */
+  startTrainingSession(trainerName?: string, config?: Partial<TrainingConfig>): TrainingSession {
+    // End any existing session
+    if (this.trainingSession && this.trainingSession.state === 'active') {
+      this.endTrainingSession();
+    }
+
+    // Apply custom config
+    if (config) {
+      this.trainingConfig = { ...DEFAULT_TRAINING_CONFIG, ...config };
+    }
+
+    // Create new session
+    this.trainingSession = createTrainingSession(trainerName);
+    this.trainingSession.state = 'active';
+    this.console.log(`Training session started: ${this.trainingSession.id}`);
+
+    this.emitTrainingStatus();
+    return this.trainingSession;
+  }
+
+  /** Pause the current training session */
+  pauseTrainingSession(): boolean {
+    if (!this.trainingSession || this.trainingSession.state !== 'active') {
+      return false;
+    }
+
+    this.trainingSession.state = 'paused';
+    this.trainingSession.updatedAt = Date.now();
+    this.console.log('Training session paused');
+    this.emitTrainingStatus();
+    return true;
+  }
+
+  /** Resume a paused training session */
+  resumeTrainingSession(): boolean {
+    if (!this.trainingSession || this.trainingSession.state !== 'paused') {
+      return false;
+    }
+
+    this.trainingSession.state = 'active';
+    this.trainingSession.updatedAt = Date.now();
+    this.console.log('Training session resumed');
+    this.emitTrainingStatus();
+    return true;
+  }
+
+  /** End the current training session */
+  endTrainingSession(): TrainingSession | null {
+    if (!this.trainingSession) {
+      return null;
+    }
+
+    this.trainingSession.state = 'completed';
+    this.trainingSession.completedAt = Date.now();
+    this.trainingSession.updatedAt = Date.now();
+    this.trainingSession.stats = calculateTrainingStats(
+      this.trainingSession,
+      this.topology.cameras.length
+    );
+
+    this.console.log(
+      `Training session completed: ${this.trainingSession.stats.camerasVisited} cameras, ` +
+      `${this.trainingSession.stats.transitsRecorded} transits, ` +
+      `${this.trainingSession.stats.landmarksMarked} landmarks`
+    );
+
+    const session = this.trainingSession;
+    this.emitTrainingStatus();
+    return session;
+  }
+
+  /** Record that trainer was detected on a camera */
+  recordTrainerDetection(
+    cameraId: string,
+    detection: ObjectDetectionResult,
+    detectionConfidence: number
+  ): void {
+    if (!this.trainingSession || this.trainingSession.state !== 'active') {
+      return;
+    }
+
+    // Only process person detections during training
+    if (detection.className !== 'person') {
+      return;
+    }
+
+    // Check confidence threshold
+    if (detectionConfidence < this.trainingConfig.minDetectionConfidence) {
+      return;
+    }
+
+    const camera = findCamera(this.topology, cameraId);
+    const cameraName = camera?.name || cameraId;
+    const now = Date.now();
+
+    // Check if this is a new camera or same camera
+    if (this.trainingSession.currentCameraId === cameraId) {
+      // Update existing visit
+      const currentVisit = this.trainingSession.visits.find(
+        v => v.cameraId === cameraId && v.departedAt === null
+      );
+      if (currentVisit) {
+        currentVisit.detectionConfidence = Math.max(currentVisit.detectionConfidence, detectionConfidence);
+        if (detection.boundingBox) {
+          currentVisit.boundingBox = detection.boundingBox;
+        }
+      }
+    } else {
+      // This is a new camera - check for transition
+      if (this.trainingSession.currentCameraId && this.trainingSession.transitStartTime) {
+        // Complete the transit
+        const transitDuration = now - this.trainingSession.transitStartTime;
+        const fromCameraId = this.trainingSession.previousCameraId || this.trainingSession.currentCameraId;
+        const fromCamera = findCamera(this.topology, fromCameraId);
+
+        // Mark departure from previous camera
+        const prevVisit = this.trainingSession.visits.find(
+          v => v.cameraId === fromCameraId && v.departedAt === null
+        );
+        if (prevVisit) {
+          prevVisit.departedAt = this.trainingSession.transitStartTime;
+        }
+
+        // Check for overlap (both cameras detecting at same time)
+        const hasOverlap = this.checkTrainingOverlap(fromCameraId, cameraId, now);
+
+        // Record the transit
+        const transit: TrainingTransit = {
+          id: `transit-${now}`,
+          fromCameraId,
+          toCameraId: cameraId,
+          startTime: this.trainingSession.transitStartTime,
+          endTime: now,
+          transitSeconds: Math.round(transitDuration / 1000),
+          hasOverlap,
+        };
+        this.trainingSession.transits.push(transit);
+
+        this.console.log(
+          `Training transit: ${fromCamera?.name || fromCameraId} → ${cameraName} ` +
+          `(${transit.transitSeconds}s${hasOverlap ? ', overlap detected' : ''})`
+        );
+
+        // If overlap detected, record it
+        if (hasOverlap && this.trainingConfig.autoDetectOverlaps) {
+          this.recordTrainingOverlap(fromCameraId, cameraId);
+        }
+      }
+
+      // Record new camera visit
+      const visit: TrainingCameraVisit = {
+        cameraId,
+        cameraName,
+        arrivedAt: now,
+        departedAt: null,
+        trainerEmbedding: detection.embedding,
+        detectionConfidence,
+        boundingBox: detection.boundingBox,
+        floorPlanPosition: camera?.floorPlanPosition,
+      };
+      this.trainingSession.visits.push(visit);
+
+      // Update session state
+      this.trainingSession.previousCameraId = this.trainingSession.currentCameraId;
+      this.trainingSession.currentCameraId = cameraId;
+      this.trainingSession.transitStartTime = now;
+
+      // Store trainer embedding if not already captured
+      if (!this.trainingSession.trainerEmbedding && detection.embedding) {
+        this.trainingSession.trainerEmbedding = detection.embedding;
+      }
+    }
+
+    this.trainingSession.updatedAt = now;
+    this.trainingSession.stats = calculateTrainingStats(
+      this.trainingSession,
+      this.topology.cameras.length
+    );
+    this.emitTrainingStatus();
+  }
+
+  /** Check if there's overlap between two cameras during training */
+  private checkTrainingOverlap(fromCameraId: string, toCameraId: string, now: number): boolean {
+    // Check if both cameras have recent visits overlapping in time
+    const fromVisit = this.trainingSession?.visits.find(
+      v => v.cameraId === fromCameraId &&
+           (v.departedAt === null || v.departedAt > now - 5000) // Within 5 seconds
+    );
+    const toVisit = this.trainingSession?.visits.find(
+      v => v.cameraId === toCameraId &&
+           v.arrivedAt <= now &&
+           v.arrivedAt >= now - 5000 // Arrived within last 5 seconds
+    );
+
+    return !!(fromVisit && toVisit);
+  }
+
+  /** Record a camera overlap detected during training */
+  private recordTrainingOverlap(camera1Id: string, camera2Id: string): void {
+    if (!this.trainingSession) return;
+
+    // Check if we already have this overlap
+    const existingOverlap = this.trainingSession.overlaps.find(
+      o => (o.camera1Id === camera1Id && o.camera2Id === camera2Id) ||
+           (o.camera1Id === camera2Id && o.camera2Id === camera1Id)
+    );
+    if (existingOverlap) return;
+
+    const camera1 = findCamera(this.topology, camera1Id);
+    const camera2 = findCamera(this.topology, camera2Id);
+
+    // Calculate approximate position (midpoint of both camera positions)
+    let position = { x: 50, y: 50 };
+    if (camera1?.floorPlanPosition && camera2?.floorPlanPosition) {
+      position = {
+        x: (camera1.floorPlanPosition.x + camera2.floorPlanPosition.x) / 2,
+        y: (camera1.floorPlanPosition.y + camera2.floorPlanPosition.y) / 2,
+      };
+    }
+
+    const overlap: TrainingOverlap = {
+      id: `overlap-${Date.now()}`,
+      camera1Id,
+      camera2Id,
+      position,
+      radius: 30, // Default radius
+      markedAt: Date.now(),
+    };
+    this.trainingSession.overlaps.push(overlap);
+
+    this.console.log(`Camera overlap detected: ${camera1?.name} ↔ ${camera2?.name}`);
+  }
+
+  /** Manually mark a landmark during training */
+  markTrainingLandmark(landmark: Omit<TrainingLandmark, 'id' | 'markedAt'>): TrainingLandmark | null {
+    if (!this.trainingSession) return null;
+
+    const newLandmark: TrainingLandmark = {
+      ...landmark,
+      id: `landmark-${Date.now()}`,
+      markedAt: Date.now(),
+    };
+    this.trainingSession.landmarks.push(newLandmark);
+    this.trainingSession.updatedAt = Date.now();
+    this.trainingSession.stats = calculateTrainingStats(
+      this.trainingSession,
+      this.topology.cameras.length
+    );
+
+    this.console.log(`Landmark marked: ${newLandmark.name} (${newLandmark.type})`);
+    this.emitTrainingStatus();
+    return newLandmark;
+  }
+
+  /** Manually mark a structure during training */
+  markTrainingStructure(structure: Omit<TrainingStructure, 'id' | 'markedAt'>): TrainingStructure | null {
+    if (!this.trainingSession) return null;
+
+    const newStructure: TrainingStructure = {
+      ...structure,
+      id: `structure-${Date.now()}`,
+      markedAt: Date.now(),
+    };
+    this.trainingSession.structures.push(newStructure);
+    this.trainingSession.updatedAt = Date.now();
+    this.trainingSession.stats = calculateTrainingStats(
+      this.trainingSession,
+      this.topology.cameras.length
+    );
+
+    this.console.log(`Structure marked: ${newStructure.name} (${newStructure.type})`);
+    this.emitTrainingStatus();
+    return newStructure;
+  }
+
+  /** Confirm camera position on floor plan during training */
+  confirmCameraPosition(cameraId: string, position: { x: number; y: number }): boolean {
+    if (!this.trainingSession) return false;
+
+    // Update in current session
+    const visit = this.trainingSession.visits.find(v => v.cameraId === cameraId);
+    if (visit) {
+      visit.floorPlanPosition = position;
+    }
+
+    // Update in topology
+    const camera = findCamera(this.topology, cameraId);
+    if (camera) {
+      camera.floorPlanPosition = position;
+      if (this.onTopologyChange) {
+        this.onTopologyChange(this.topology);
+      }
+    }
+
+    this.trainingSession.updatedAt = Date.now();
+    this.emitTrainingStatus();
+    return true;
+  }
+
+  /** Get training status for UI updates */
+  getTrainingStatus(): TrainingStatusUpdate | null {
+    if (!this.trainingSession) return null;
+
+    const currentCamera = this.trainingSession.currentCameraId
+      ? findCamera(this.topology, this.trainingSession.currentCameraId)
+      : null;
+
+    const previousCamera = this.trainingSession.previousCameraId
+      ? findCamera(this.topology, this.trainingSession.previousCameraId)
+      : null;
+
+    // Generate suggestions for next actions
+    const suggestions: string[] = [];
+    const visitedCameras = new Set(this.trainingSession.visits.map(v => v.cameraId));
+    const unvisitedCameras = this.topology.cameras.filter(c => !visitedCameras.has(c.deviceId));
+
+    if (unvisitedCameras.length > 0) {
+      // Suggest nearest unvisited camera based on connections
+      const currentConnections = currentCamera
+        ? findConnectionsFrom(this.topology, currentCamera.deviceId)
+        : [];
+      const connectedUnvisited = currentConnections
+        .map(c => c.toCameraId)
+        .filter(id => !visitedCameras.has(id));
+
+      if (connectedUnvisited.length > 0) {
+        const nextCam = findCamera(this.topology, connectedUnvisited[0]);
+        if (nextCam) {
+          suggestions.push(`Walk to ${nextCam.name}`);
+        }
+      } else {
+        suggestions.push(`${unvisitedCameras.length} cameras not yet visited`);
+      }
+    }
+
+    if (this.trainingSession.visits.length >= 2 && this.trainingSession.landmarks.length === 0) {
+      suggestions.push('Consider marking some landmarks');
+    }
+
+    if (visitedCameras.size >= this.topology.cameras.length) {
+      suggestions.push('All cameras visited! You can end training.');
+    }
+
+    const status: TrainingStatusUpdate = {
+      sessionId: this.trainingSession.id,
+      state: this.trainingSession.state,
+      currentCamera: currentCamera ? {
+        id: currentCamera.deviceId,
+        name: currentCamera.name,
+        detectedAt: this.trainingSession.visits.find(v => v.cameraId === currentCamera.deviceId && !v.departedAt)?.arrivedAt || Date.now(),
+        confidence: this.trainingSession.visits.find(v => v.cameraId === currentCamera.deviceId && !v.departedAt)?.detectionConfidence || 0,
+      } : undefined,
+      activeTransit: this.trainingSession.transitStartTime && previousCamera ? {
+        fromCameraId: previousCamera.deviceId,
+        fromCameraName: previousCamera.name,
+        startTime: this.trainingSession.transitStartTime,
+        elapsedSeconds: Math.round((Date.now() - this.trainingSession.transitStartTime) / 1000),
+      } : undefined,
+      stats: this.trainingSession.stats,
+      suggestions,
+    };
+
+    return status;
+  }
+
+  /** Emit training status update to callback */
+  private emitTrainingStatus(): void {
+    if (this.onTrainingStatusUpdate) {
+      const status = this.getTrainingStatus();
+      if (status) {
+        this.onTrainingStatusUpdate(status);
+      }
+    }
+  }
+
+  /** Apply training results to topology */
+  applyTrainingToTopology(): TrainingApplicationResult {
+    const result: TrainingApplicationResult = {
+      camerasAdded: 0,
+      connectionsCreated: 0,
+      connectionsUpdated: 0,
+      landmarksAdded: 0,
+      zonesCreated: 0,
+      warnings: [],
+      success: false,
+    };
+
+    if (!this.trainingSession) {
+      result.warnings.push('No training session to apply');
+      return result;
+    }
+
+    try {
+      // 1. Update camera positions from training visits
+      for (const visit of this.trainingSession.visits) {
+        const camera = findCamera(this.topology, visit.cameraId);
+        if (camera && visit.floorPlanPosition) {
+          if (!camera.floorPlanPosition) {
+            camera.floorPlanPosition = visit.floorPlanPosition;
+            result.camerasAdded++;
+          }
+        }
+      }
+
+      // 2. Create or update connections from training transits
+      for (const transit of this.trainingSession.transits) {
+        const existingConnection = findConnection(
+          this.topology,
+          transit.fromCameraId,
+          transit.toCameraId
+        );
+
+        if (existingConnection) {
+          // Update existing connection with observed transit time
+          const transitMs = transit.transitSeconds * 1000;
+          existingConnection.transitTime = {
+            min: Math.min(existingConnection.transitTime.min, transitMs * 0.7),
+            typical: transitMs,
+            max: Math.max(existingConnection.transitTime.max, transitMs * 1.3),
+          };
+          result.connectionsUpdated++;
+        } else {
+          // Create new connection
+          const fromCamera = findCamera(this.topology, transit.fromCameraId);
+          const toCamera = findCamera(this.topology, transit.toCameraId);
+
+          if (fromCamera && toCamera) {
+            const transitMs = transit.transitSeconds * 1000;
+            const newConnection: CameraConnection = {
+              id: `conn-training-${Date.now()}-${result.connectionsCreated}`,
+              fromCameraId: transit.fromCameraId,
+              toCameraId: transit.toCameraId,
+              name: `${fromCamera.name} to ${toCamera.name}`,
+              exitZone: [], // Will be refined in topology editor
+              entryZone: [], // Will be refined in topology editor
+              transitTime: {
+                min: transitMs * 0.7,
+                typical: transitMs,
+                max: transitMs * 1.3,
+              },
+              bidirectional: true,
+            };
+            this.topology.connections.push(newConnection);
+            result.connectionsCreated++;
+          }
+        }
+      }
+
+      // 3. Add landmarks from training
+      for (const trainLandmark of this.trainingSession.landmarks) {
+        // Map training landmark type to topology landmark type
+        const typeMapping: Record<string, LandmarkType> = {
+          mailbox: 'feature',
+          garage: 'structure',
+          shed: 'structure',
+          tree: 'feature',
+          gate: 'access',
+          door: 'access',
+          driveway: 'access',
+          pathway: 'access',
+          garden: 'feature',
+          pool: 'feature',
+          deck: 'structure',
+          patio: 'structure',
+          other: 'feature',
+        };
+
+        // Convert training landmark to topology landmark
+        const landmark: Landmark = {
+          id: trainLandmark.id,
+          name: trainLandmark.name,
+          type: typeMapping[trainLandmark.type] || 'feature',
+          position: trainLandmark.position,
+          visibleFromCameras: trainLandmark.visibleFromCameras.length > 0
+            ? trainLandmark.visibleFromCameras
+            : undefined,
+          description: trainLandmark.description,
+        };
+
+        if (!this.topology.landmarks) {
+          this.topology.landmarks = [];
+        }
+        this.topology.landmarks.push(landmark);
+        result.landmarksAdded++;
+      }
+
+      // 4. Create zones from overlaps
+      for (const overlap of this.trainingSession.overlaps) {
+        const camera1 = findCamera(this.topology, overlap.camera1Id);
+        const camera2 = findCamera(this.topology, overlap.camera2Id);
+
+        if (camera1 && camera2) {
+          // Create global zone for overlap area
+          const zoneName = `${camera1.name}/${camera2.name} Overlap`;
+          const existingZone = this.topology.globalZones?.find(z => z.name === zoneName);
+
+          if (!existingZone) {
+            if (!this.topology.globalZones) {
+              this.topology.globalZones = [];
+            }
+
+            // Create camera zone mappings (placeholder zones to be refined in editor)
+            const cameraZones: CameraZoneMapping[] = [
+              { cameraId: overlap.camera1Id, zone: [] },
+              { cameraId: overlap.camera2Id, zone: [] },
+            ];
+
+            this.topology.globalZones.push({
+              id: `zone-overlap-${overlap.id}`,
+              name: zoneName,
+              type: 'dwell', // Overlap zones are good for tracking dwell time
+              cameraZones,
+            });
+            result.zonesCreated++;
+          }
+        }
+      }
+
+      // Notify about topology change
+      if (this.onTopologyChange) {
+        this.onTopologyChange(this.topology);
+      }
+
+      result.success = true;
+      this.console.log(
+        `Training applied: ${result.connectionsCreated} connections created, ` +
+        `${result.connectionsUpdated} updated, ${result.landmarksAdded} landmarks added`
+      );
+    } catch (e) {
+      result.warnings.push(`Error applying training: ${e}`);
+    }
+
+    return result;
+  }
+
+  /** Clear the current training session without applying */
+  clearTrainingSession(): void {
+    this.trainingSession = null;
+    this.emitTrainingStatus();
   }
 }

@@ -73,11 +73,20 @@ This plugin **tracks objects across your entire camera system**, understanding t
 - **AI Landmark Suggestions**: System learns to identify landmarks from camera footage over time
 - **Spatial Relationships**: Auto-inferred relationships between cameras and landmarks based on position
 
-### Automatic Learning (NEW in v0.3.0)
+### Automatic Learning
 - **Transit Time Learning**: Automatically adjusts connection transit times based on observed movement patterns
 - **Connection Suggestions**: System suggests new camera connections based on observed object movements
 - **Confidence Scoring**: Suggestions include confidence scores based on consistency of observations
 - **One-Click Approval**: Accept or reject suggestions directly from the topology editor
+
+### Training Mode (NEW in v0.4.0)
+- **Guided Walkthrough**: Walk your property and let the system learn your camera layout
+- **Mobile-Optimized UI**: Designed for phone use while walking around
+- **Auto Camera Detection**: System detects you automatically as you walk
+- **Transit Time Recording**: Learns actual transit times between cameras
+- **Overlap Detection**: Identifies where camera coverage overlaps
+- **Landmark Marking**: Mark landmarks (mailbox, gate, etc.) as you encounter them
+- **One-Click Setup**: Apply training results to generate your complete topology
 
 ### Integrations
 - **MQTT Integration**: Export tracking data to Home Assistant for automations
@@ -96,7 +105,68 @@ npm install @blueharford/scrypted-spatial-awareness
 3. Search for "@blueharford/scrypted-spatial-awareness"
 4. Click Install
 
-## Setup
+## Getting Started: Training Mode (NEW in v0.4.0)
+
+The fastest way to set up Spatial Awareness is using **Training Mode** - a guided walkthrough where you physically walk around your property while the system learns your camera layout.
+
+### Why Training Mode?
+
+Instead of manually drawing connections and guessing transit times, simply:
+1. Start training on your phone
+2. Walk between cameras
+3. The system automatically learns:
+   - Which cameras can see you
+   - How long it takes to walk between cameras
+   - Where cameras overlap
+   - Your property's layout
+
+### Quick Start
+
+1. **Open Training Mode**
+   - Navigate to: `/endpoint/@blueharford/scrypted-spatial-awareness/ui/training`
+   - Or scan the QR code in the plugin settings (mobile-optimized)
+
+2. **Start Training**
+   - Tap "Start Training"
+   - The system begins listening for person detections
+
+3. **Walk Your Property**
+   - Walk to each camera on your property
+   - The system detects you automatically and records:
+     - Camera positions
+     - Transit times between cameras
+     - Camera overlaps (when both cameras see you)
+
+4. **Mark Landmarks** (Optional)
+   - Tap the "Mark" tab to add landmarks as you encounter them
+   - Select type (mailbox, gate, shed, etc.) and name
+   - Landmarks are associated with the current camera
+
+5. **End Training**
+   - When finished, tap "End Training"
+   - Review the statistics: cameras visited, transits recorded, landmarks marked
+
+6. **Apply Results**
+   - Tap "Apply Results" to generate your topology
+   - The system creates camera connections with learned transit times
+   - Open the Topology Editor to fine-tune if needed
+
+### Training Tips
+
+- **Walk naturally** - Don't rush between cameras, walk at your normal pace
+- **Hit every camera** - Try to be detected by each camera at least once
+- **Create multiple transits** - Walk back and forth between cameras to improve accuracy
+- **Mark key landmarks** - Mailbox, gates, driveway end, etc. help with contextual alerts
+- **Re-train anytime** - Run training again to improve accuracy or add new cameras
+
+### Mobile Access
+
+Training Mode is designed to be used on your phone while walking. Access via:
+```
+https://[your-scrypted-server]/endpoint/@blueharford/scrypted-spatial-awareness/ui/training
+```
+
+## Setup (Manual)
 
 1. **Configure Topology**:
    - Open the plugin settings
@@ -233,12 +303,24 @@ The plugin exposes a REST API via Scrypted's HTTP handler:
 | `/api/landmark-templates` | GET | Get landmark templates for quick setup |
 | `/api/infer-relationships` | GET | Get auto-inferred spatial relationships |
 
-### Connection Suggestion Endpoints (NEW in v0.3.0)
+### Connection Suggestion Endpoints
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/connection-suggestions` | GET | Get suggested camera connections |
 | `/api/connection-suggestions/{id}/accept` | POST | Accept a connection suggestion |
 | `/api/connection-suggestions/{id}/reject` | POST | Reject a connection suggestion |
+
+### Training Mode Endpoints (NEW in v0.4.0)
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/training/start` | POST | Start a new training session |
+| `/api/training/pause` | POST | Pause the current training session |
+| `/api/training/resume` | POST | Resume a paused training session |
+| `/api/training/end` | POST | End the training session and get results |
+| `/api/training/status` | GET | Get current training status and stats |
+| `/api/training/landmark` | POST | Mark a landmark during training |
+| `/api/training/apply` | POST | Apply training results to topology |
+| `/ui/training` | GET | Mobile-optimized training UI |
 
 ## MQTT Topics
 
@@ -287,6 +369,15 @@ Without LLM:
 - "Dog moving from Back Yard towards Side Gate"
 
 ## Changelog
+
+### v0.4.0
+- **Training Mode**: Guided walkthrough to train the system by walking your property
+- **Mobile-Optimized Training UI**: Phone-friendly interface for training while walking
+- **Auto Camera Detection**: System automatically detects you as you walk between cameras
+- **Transit Time Learning**: Records actual transit times during training
+- **Camera Overlap Detection**: Identifies where multiple cameras see the same area
+- **Landmark Marking**: Mark landmarks (mailbox, gate, etc.) during training sessions
+- **One-Click Topology Generation**: Apply training results to create complete topology
 
 ### v0.3.0
 - **Live Tracking Overlay**: View tracked objects in real-time on the floor plan
