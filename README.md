@@ -56,6 +56,15 @@ This plugin **tracks objects across your entire camera system**, understanding t
 - **Loitering Threshold**: Only alert after objects are visible for a configurable duration
 - **Multiple Notifiers**: Send alerts to multiple notification services simultaneously
 
+### Advanced Spatial Awareness
+
+- **Landmarks & Static Objects**: Define landmarks like mailbox, shed, driveway, deck to give the system spatial context
+- **Camera Context**: Describe where each camera is mounted and what it can see for richer descriptions
+- **Field of View Configuration**: Define camera FOV (simple angle or polygon) to understand coverage overlap
+- **RAG-Powered Reasoning**: Uses Retrieval-Augmented Generation to understand property layout for intelligent descriptions
+- **AI Landmark Suggestions**: System learns to identify landmarks from camera footage over time
+- **Spatial Relationships**: Auto-inferred relationships between cameras and landmarks based on position
+
 ## Installation
 
 ### From NPM (Recommended)
@@ -156,6 +165,7 @@ This transforms generic alerts into contextual, actionable information.
 
 The plugin exposes a REST API via Scrypted's HTTP handler:
 
+### Core Endpoints
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/tracked-objects` | GET | List all tracked objects |
@@ -167,6 +177,18 @@ The plugin exposes a REST API via Scrypted's HTTP handler:
 | `/api/cameras` | GET | List available cameras |
 | `/api/floor-plan` | GET/POST | Get or upload floor plan image |
 | `/ui/editor` | GET | Visual topology editor |
+
+### Landmark & Spatial Reasoning Endpoints
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/landmarks` | GET | List all configured landmarks |
+| `/api/landmarks` | POST | Add a new landmark |
+| `/api/landmarks/{id}` | GET/PUT/DELETE | Get, update, or delete a landmark |
+| `/api/landmark-suggestions` | GET | Get AI-suggested landmarks |
+| `/api/landmark-suggestions/{id}/accept` | POST | Accept an AI suggestion |
+| `/api/landmark-suggestions/{id}/reject` | POST | Reject an AI suggestion |
+| `/api/landmark-templates` | GET | Get landmark templates for quick setup |
+| `/api/infer-relationships` | GET | Get auto-inferred spatial relationships |
 
 ## MQTT Topics
 

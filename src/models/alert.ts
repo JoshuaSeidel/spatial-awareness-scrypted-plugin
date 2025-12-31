@@ -78,6 +78,13 @@ export interface AlertDetails {
   objectLabel?: string;
   /** Thumbnail image URL or data */
   thumbnailUrl?: string;
+  // --- Spatial Context from RAG ---
+  /** Description of the path taken (from spatial reasoning) */
+  pathDescription?: string;
+  /** Names of landmarks involved in the movement */
+  involvedLandmarks?: string[];
+  /** Whether LLM was used for description */
+  usedLlm?: boolean;
 }
 
 /** A condition for alert rules */
@@ -211,9 +218,22 @@ export function generateAlertMessage(
     case 'property_exit':
       return `${objectDesc} exited property via ${details.cameraName || 'unknown camera'}`;
     case 'movement':
+      // If we have a rich description from LLM/RAG, use it
+      if (details.objectLabel && details.usedLlm) {
+        const transitSecs = details.transitTime ? Math.round(details.transitTime / 1000) : 0;
+        const transitStr = transitSecs > 0 ? ` (${transitSecs}s)` : '';
+        // Include path/landmark context if available
+        const pathContext = details.pathDescription ? ` via ${details.pathDescription}` : '';
+        return `${details.objectLabel}${pathContext}${transitStr}`;
+      }
+      // Fallback to basic message with landmark info
       const transitSecs = details.transitTime ? Math.round(details.transitTime / 1000) : 0;
       const transitStr = transitSecs > 0 ? ` (${transitSecs}s transit)` : '';
-      return `${objectDesc} moving from ${details.fromCameraName || 'unknown'} towards ${details.toCameraName || 'unknown'}${transitStr}`;
+      let movementDesc = `${objectDesc} moving from ${details.fromCameraName || 'unknown'} towards ${details.toCameraName || 'unknown'}`;
+      if (details.involvedLandmarks && details.involvedLandmarks.length > 0) {
+        movementDesc += ` near ${details.involvedLandmarks.join(', ')}`;
+      }
+      return `${movementDesc}${transitStr}`;
     case 'unusual_path':
       return `${objectDesc} took unusual path: ${details.actualPath || 'unknown'}`;
     case 'dwell_time':

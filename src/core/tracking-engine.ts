@@ -14,7 +14,7 @@ import sdk, {
   Camera,
   MediaObject,
 } from '@scrypted/sdk';
-import { CameraTopology, findCamera, findConnection, findConnectionsFrom } from '../models/topology';
+import { CameraTopology, findCamera, findConnection, findConnectionsFrom, Landmark } from '../models/topology';
 import {
   TrackedObject,
   ObjectSighting,
@@ -25,6 +25,11 @@ import {
 import { TrackingState } from '../state/tracking-state';
 import { AlertManager } from '../alerts/alert-manager';
 import { ObjectCorrelator } from './object-correlator';
+import {
+  SpatialReasoningEngine,
+  SpatialReasoningConfig,
+  SpatialReasoningResult,
+} from './spatial-reasoning';
 
 const { systemManager } = sdk;
 
@@ -43,6 +48,10 @@ export interface TrackingEngineConfig {
   objectAlertCooldown: number;
   /** Use LLM for enhanced descriptions */
   useLlmDescriptions: boolean;
+  /** Enable landmark learning from AI */
+  enableLandmarkLearning?: boolean;
+  /** Minimum confidence for landmark suggestions */
+  landmarkConfidenceThreshold?: number;
 }
 
 export class TrackingEngine {
@@ -52,13 +61,14 @@ export class TrackingEngine {
   private config: TrackingEngineConfig;
   private console: Console;
   private correlator: ObjectCorrelator;
+  private spatialReasoning: SpatialReasoningEngine;
   private listeners: Map<string, EventListenerRegister> = new Map();
   private pendingTimers: Map<GlobalTrackingId, NodeJS.Timeout> = new Map();
   private lostCheckInterval: NodeJS.Timeout | null = null;
   /** Track last alert time per object to enforce cooldown */
   private objectLastAlertTime: Map<GlobalTrackingId, number> = new Map();
-  /** Cache for LLM device reference */
-  private llmDevice: ObjectDetection | null = null;
+  /** Callback for topology changes (e.g., landmark suggestions) */
+  private onTopologyChange?: (topology: CameraTopology) => void;
 
   constructor(
     topology: CameraTopology,
@@ -73,6 +83,21 @@ export class TrackingEngine {
     this.config = config;
     this.console = console;
     this.correlator = new ObjectCorrelator(topology, config);
+
+    // Initialize spatial reasoning engine
+    const spatialConfig: SpatialReasoningConfig = {
+      enableLlm: config.useLlmDescriptions,
+      enableLandmarkLearning: config.enableLandmarkLearning ?? true,
+      landmarkConfidenceThreshold: config.landmarkConfidenceThreshold ?? 0.7,
+      contextCacheTtl: 60000, // 1 minute cache
+    };
+    this.spatialReasoning = new SpatialReasoningEngine(spatialConfig, console);
+    this.spatialReasoning.updateTopology(topology);
+  }
+
+  /** Set callback for topology changes */
+  setTopologyChangeCallback(callback: (topology: CameraTopology) => void): void {
+    this.onTopologyChange = callback;
   }
 
   /** Start listening to all cameras in topology */
@@ -207,58 +232,69 @@ export class TrackingEngine {
     this.objectLastAlertTime.set(globalId, Date.now());
   }
 
-  /** Try to get LLM-enhanced description for movement */
-  private async getLlmDescription(
+  /** Get spatial reasoning result for movement (uses RAG + LLM) */
+  private async getSpatialDescription(
     tracked: TrackedObject,
-    fromCamera: string,
-    toCamera: string,
-    cameraId: string
-  ): Promise<string | null> {
-    if (!this.config.useLlmDescriptions) return null;
-
+    fromCameraId: string,
+    toCameraId: string,
+    transitTime: number,
+    currentCameraId: string
+  ): Promise<SpatialReasoningResult | null> {
     try {
-      // Find LLM plugin device if not cached
-      if (!this.llmDevice) {
-        for (const id of Object.keys(systemManager.getSystemState())) {
-          const device = systemManager.getDeviceById(id);
-          if (device?.interfaces?.includes(ScryptedInterface.ObjectDetection) &&
-              device.name?.toLowerCase().includes('llm')) {
-            this.llmDevice = device as unknown as ObjectDetection;
-            this.console.log(`Found LLM device: ${device.name}`);
-            break;
-          }
+      // Get snapshot from camera for LLM analysis (if LLM is enabled)
+      let mediaObject: MediaObject | undefined;
+      if (this.config.useLlmDescriptions) {
+        const camera = systemManager.getDeviceById<Camera>(currentCameraId);
+        if (camera?.interfaces?.includes(ScryptedInterface.Camera)) {
+          mediaObject = await camera.takePicture();
         }
       }
 
-      if (!this.llmDevice) return null;
+      // Use spatial reasoning engine for rich context-aware description
+      const result = await this.spatialReasoning.generateMovementDescription(
+        tracked,
+        fromCameraId,
+        toCameraId,
+        transitTime,
+        mediaObject
+      );
 
-      // Get snapshot from camera for LLM analysis
-      const camera = systemManager.getDeviceById<Camera>(cameraId);
-      if (!camera?.interfaces?.includes(ScryptedInterface.Camera)) return null;
-
-      const picture = await camera.takePicture();
-      if (!picture) return null;
-
-      // Ask LLM to describe the movement
-      const prompt = `Describe this ${tracked.className} in one short sentence. ` +
-        `They are moving from the ${fromCamera} area towards the ${toCamera}. ` +
-        `Include details like: gender (man/woman), clothing color, vehicle color/type if applicable. ` +
-        `Example: "Man in blue jacket walking from garage towards front door" or ` +
-        `"Black SUV driving from driveway towards street"`;
-
-      const result = await this.llmDevice.detectObjects(picture, {
-        settings: { prompt }
-      } as any);
-
-      // Extract description from LLM response
-      if (result.detections?.[0]?.label) {
-        return result.detections[0].label;
+      // Optionally trigger landmark learning
+      if (this.config.enableLandmarkLearning && mediaObject) {
+        this.tryLearnLandmark(currentCameraId, mediaObject, tracked.className);
       }
 
-      return null;
+      return result;
     } catch (e) {
-      this.console.warn('LLM description failed:', e);
+      this.console.warn('Spatial reasoning failed:', e);
       return null;
+    }
+  }
+
+  /** Try to learn new landmarks from detections (background task) */
+  private async tryLearnLandmark(
+    cameraId: string,
+    mediaObject: MediaObject,
+    objectClass: string
+  ): Promise<void> {
+    try {
+      // Position is approximate - could be improved with object position from detection
+      const position = { x: 50, y: 50 };
+      const suggestion = await this.spatialReasoning.suggestLandmark(
+        cameraId,
+        mediaObject,
+        objectClass,
+        position
+      );
+
+      if (suggestion) {
+        this.console.log(
+          `AI suggested landmark: ${suggestion.landmark.name} ` +
+          `(${suggestion.landmark.type}, confidence: ${suggestion.landmark.aiConfidence?.toFixed(2)})`
+        );
+      }
+    } catch (e) {
+      // Landmark learning is best-effort, don't log errors
     }
   }
 
@@ -300,11 +336,12 @@ export class TrackingEngine {
 
         // Check loitering threshold and per-object cooldown before alerting
         if (this.passesLoiteringThreshold(tracked) && !this.isInAlertCooldown(tracked.globalId)) {
-          // Try to get LLM-enhanced description
-          const llmDescription = await this.getLlmDescription(
+          // Get spatial reasoning result with RAG context
+          const spatialResult = await this.getSpatialDescription(
             tracked,
-            lastSighting.cameraName,
-            sighting.cameraName,
+            lastSighting.cameraId,
+            sighting.cameraId,
+            transitDuration,
             sighting.cameraId
           );
 
@@ -316,8 +353,12 @@ export class TrackingEngine {
             toCameraName: sighting.cameraName,
             transitTime: transitDuration,
             objectClass: sighting.detection.className,
-            objectLabel: llmDescription || sighting.detection.label,
+            objectLabel: spatialResult?.description || sighting.detection.label,
             detectionId: sighting.detectionId,
+            // Include spatial context for enriched alerts
+            pathDescription: spatialResult?.pathDescription,
+            involvedLandmarks: spatialResult?.involvedLandmarks?.map(l => l.name),
+            usedLlm: spatialResult?.usedLlm,
           });
 
           this.recordAlertTime(tracked.globalId);
@@ -354,10 +395,12 @@ export class TrackingEngine {
       // Generate entry alert if this is an entry point
       // Entry alerts also respect loitering threshold and cooldown
       if (isEntryPoint && this.passesLoiteringThreshold(tracked) && !this.isInAlertCooldown(globalId)) {
-        const llmDescription = await this.getLlmDescription(
+        // Get spatial reasoning for entry event
+        const spatialResult = await this.getSpatialDescription(
           tracked,
-          'outside',
-          sighting.cameraName,
+          'outside', // Virtual "outside" location for entry
+          sighting.cameraId,
+          0,
           sighting.cameraId
         );
 
@@ -365,8 +408,10 @@ export class TrackingEngine {
           cameraId: sighting.cameraId,
           cameraName: sighting.cameraName,
           objectClass: sighting.detection.className,
-          objectLabel: llmDescription || sighting.detection.label,
+          objectLabel: spatialResult?.description || sighting.detection.label,
           detectionId: sighting.detectionId,
+          involvedLandmarks: spatialResult?.involvedLandmarks?.map(l => l.name),
+          usedLlm: spatialResult?.usedLlm,
         });
 
         this.recordAlertTime(globalId);
@@ -471,6 +516,45 @@ export class TrackingEngine {
   updateTopology(topology: CameraTopology): void {
     this.topology = topology;
     this.correlator = new ObjectCorrelator(topology, this.config);
+    this.spatialReasoning.updateTopology(topology);
+  }
+
+  /** Get pending landmark suggestions */
+  getPendingLandmarkSuggestions(): import('../models/topology').LandmarkSuggestion[] {
+    return this.spatialReasoning.getPendingSuggestions();
+  }
+
+  /** Accept a landmark suggestion, adding it to topology */
+  acceptLandmarkSuggestion(suggestionId: string): Landmark | null {
+    const landmark = this.spatialReasoning.acceptSuggestion(suggestionId);
+    if (landmark && this.topology) {
+      // Add the accepted landmark to topology
+      if (!this.topology.landmarks) {
+        this.topology.landmarks = [];
+      }
+      this.topology.landmarks.push(landmark);
+
+      // Notify about topology change
+      if (this.onTopologyChange) {
+        this.onTopologyChange(this.topology);
+      }
+    }
+    return landmark;
+  }
+
+  /** Reject a landmark suggestion */
+  rejectLandmarkSuggestion(suggestionId: string): boolean {
+    return this.spatialReasoning.rejectSuggestion(suggestionId);
+  }
+
+  /** Get landmark templates for UI */
+  getLandmarkTemplates(): typeof import('../models/topology').LANDMARK_TEMPLATES {
+    return this.spatialReasoning.getLandmarkTemplates();
+  }
+
+  /** Get the spatial reasoning engine for direct access */
+  getSpatialReasoningEngine(): SpatialReasoningEngine {
+    return this.spatialReasoning;
   }
 
   /** Get current topology */

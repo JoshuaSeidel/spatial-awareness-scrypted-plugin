@@ -89,6 +89,22 @@ export const EDITOR_HTML = `<!DOCTYPE html>
             <div class="connection-item" style="color: #666; text-align: center; cursor: default;">No connections configured</div>
           </div>
         </div>
+        <div class="section">
+          <div class="section-title">
+            <span>Landmarks</span>
+            <button class="btn btn-small" onclick="openAddLandmarkModal()">+ Add</button>
+          </div>
+          <div id="landmark-list">
+            <div class="landmark-item" style="color: #666; text-align: center; cursor: default; padding: 8px;">No landmarks configured</div>
+          </div>
+        </div>
+        <div class="section" id="suggestions-section" style="display: none;">
+          <div class="section-title">
+            <span>AI Suggestions</span>
+            <button class="btn btn-small" onclick="loadSuggestions()">Refresh</button>
+          </div>
+          <div id="suggestions-list"></div>
+        </div>
       </div>
     </div>
     <div class="editor">
@@ -102,6 +118,7 @@ export const EDITOR_HTML = `<!DOCTYPE html>
           <button class="btn" id="tool-wall" onclick="setTool('wall')">Draw Wall</button>
           <button class="btn" id="tool-room" onclick="setTool('room')">Draw Room</button>
           <button class="btn" id="tool-camera" onclick="setTool('camera')">Place Camera</button>
+          <button class="btn" id="tool-landmark" onclick="setTool('landmark')">Place Landmark</button>
           <button class="btn" id="tool-connect" onclick="setTool('connect')">Connect</button>
         </div>
         <div class="toolbar-group">
@@ -129,7 +146,7 @@ export const EDITOR_HTML = `<!DOCTYPE html>
           <span id="status-text">Ready</span>
         </div>
         <div>
-          <span id="camera-count">0</span> cameras | <span id="connection-count">0</span> connections
+          <span id="camera-count">0</span> cameras | <span id="connection-count">0</span> connections | <span id="landmark-count">0</span> landmarks
         </div>
       </div>
     </div>
@@ -223,12 +240,61 @@ export const EDITOR_HTML = `<!DOCTYPE html>
     </div>
   </div>
 
+  <div class="modal-overlay" id="add-landmark-modal">
+    <div class="modal">
+      <h2>Add Landmark</h2>
+      <div class="form-group">
+        <label>Landmark Type</label>
+        <select id="landmark-type-select" onchange="updateLandmarkSuggestions()">
+          <option value="structure">Structure (House, Garage, Shed)</option>
+          <option value="feature">Feature (Mailbox, Tree, Pool)</option>
+          <option value="boundary">Boundary (Fence, Wall, Hedge)</option>
+          <option value="access">Access (Driveway, Walkway, Gate)</option>
+          <option value="vehicle">Vehicle (Parking, Boat, RV)</option>
+          <option value="neighbor">Neighbor (House, Driveway)</option>
+          <option value="zone">Zone (Front Yard, Back Yard)</option>
+          <option value="street">Street (Street, Sidewalk, Alley)</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Quick Templates</label>
+        <div id="landmark-templates" style="display: flex; flex-wrap: wrap; gap: 5px;"></div>
+      </div>
+      <div class="form-group">
+        <label>Name</label>
+        <input type="text" id="landmark-name-input" placeholder="e.g., Front Porch, Red Shed">
+      </div>
+      <div class="form-group">
+        <label>Description (optional)</label>
+        <input type="text" id="landmark-desc-input" placeholder="Brief description for AI context">
+      </div>
+      <div class="form-group">
+        <label class="checkbox-group">
+          <input type="checkbox" id="landmark-entry-checkbox">
+          Entry Point (people can enter property here)
+        </label>
+      </div>
+      <div class="form-group">
+        <label class="checkbox-group">
+          <input type="checkbox" id="landmark-exit-checkbox">
+          Exit Point (people can exit property here)
+        </label>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal('add-landmark-modal')">Cancel</button>
+        <button class="btn btn-primary" onclick="addLandmark()">Add Landmark</button>
+      </div>
+    </div>
+  </div>
+
   <script>
-    let topology = { version: '1.0', cameras: [], connections: [], globalZones: [], floorPlan: null, drawings: [] };
+    let topology = { version: '2.0', cameras: [], connections: [], globalZones: [], landmarks: [], relationships: [], floorPlan: null, drawings: [] };
     let selectedItem = null;
     let currentTool = 'select';
     let floorPlanImage = null;
     let availableCameras = [];
+    let landmarkTemplates = [];
+    let pendingSuggestions = [];
     let isDrawing = false;
     let drawStart = null;
     let currentDrawing = null;
@@ -239,6 +305,8 @@ export const EDITOR_HTML = `<!DOCTYPE html>
     async function init() {
       await loadTopology();
       await loadAvailableCameras();
+      await loadLandmarkTemplates();
+      await loadSuggestions();
       resizeCanvas();
       render();
       updateUI();
@@ -272,6 +340,192 @@ export const EDITOR_HTML = `<!DOCTYPE html>
         availableCameras = [];
       }
       updateCameraSelects();
+    }
+
+    async function loadLandmarkTemplates() {
+      try {
+        const response = await fetch('../api/landmark-templates');
+        if (response.ok) {
+          const data = await response.json();
+          landmarkTemplates = data.templates || [];
+        }
+      } catch (e) { console.error('Failed to load landmark templates:', e); }
+    }
+
+    async function loadSuggestions() {
+      try {
+        const response = await fetch('../api/landmark-suggestions');
+        if (response.ok) {
+          const data = await response.json();
+          pendingSuggestions = data.suggestions || [];
+          updateSuggestionsUI();
+        }
+      } catch (e) { console.error('Failed to load suggestions:', e); }
+    }
+
+    function updateSuggestionsUI() {
+      const section = document.getElementById('suggestions-section');
+      const list = document.getElementById('suggestions-list');
+      if (pendingSuggestions.length === 0) {
+        section.style.display = 'none';
+        return;
+      }
+      section.style.display = 'block';
+      list.innerHTML = pendingSuggestions.map(s =>
+        '<div class="camera-item" style="display: flex; justify-content: space-between; align-items: center;">' +
+        '<div><div class="camera-name">' + s.landmark.name + '</div>' +
+        '<div class="camera-info">' + s.landmark.type + ' - ' + Math.round((s.landmark.aiConfidence || 0) * 100) + '% confidence</div></div>' +
+        '<div style="display: flex; gap: 5px;">' +
+        '<button class="btn btn-small btn-primary" onclick="acceptSuggestion(\\'' + s.id + '\\')">Accept</button>' +
+        '<button class="btn btn-small" onclick="rejectSuggestion(\\'' + s.id + '\\')">Reject</button>' +
+        '</div></div>'
+      ).join('');
+    }
+
+    async function acceptSuggestion(id) {
+      try {
+        const response = await fetch('../api/landmark-suggestions/' + id + '/accept', { method: 'POST' });
+        if (response.ok) {
+          const data = await response.json();
+          if (data.landmark) {
+            topology.landmarks.push(data.landmark);
+            updateUI();
+            render();
+          }
+          await loadSuggestions();
+          setStatus('Landmark accepted', 'success');
+        }
+      } catch (e) { console.error('Failed to accept suggestion:', e); }
+    }
+
+    async function rejectSuggestion(id) {
+      try {
+        await fetch('../api/landmark-suggestions/' + id + '/reject', { method: 'POST' });
+        await loadSuggestions();
+        setStatus('Suggestion rejected', 'success');
+      } catch (e) { console.error('Failed to reject suggestion:', e); }
+    }
+
+    function openAddLandmarkModal() {
+      updateLandmarkSuggestions();
+      document.getElementById('add-landmark-modal').classList.add('active');
+    }
+
+    function updateLandmarkSuggestions() {
+      const type = document.getElementById('landmark-type-select').value;
+      const template = landmarkTemplates.find(t => t.type === type);
+      const container = document.getElementById('landmark-templates');
+      if (template) {
+        container.innerHTML = template.suggestions.map(s =>
+          '<button class="btn btn-small" onclick="setLandmarkName(\\'' + s + '\\')" style="margin: 2px;">' + s + '</button>'
+        ).join('');
+      } else {
+        container.innerHTML = '<span style="color: #666; font-size: 12px;">No templates for this type</span>';
+      }
+    }
+
+    function setLandmarkName(name) {
+      document.getElementById('landmark-name-input').value = name;
+    }
+
+    function addLandmark() {
+      const name = document.getElementById('landmark-name-input').value;
+      if (!name) { alert('Please enter a landmark name'); return; }
+      const type = document.getElementById('landmark-type-select').value;
+      const description = document.getElementById('landmark-desc-input').value;
+      const isEntry = document.getElementById('landmark-entry-checkbox').checked;
+      const isExit = document.getElementById('landmark-exit-checkbox').checked;
+      const pos = topology._pendingLandmarkPos || { x: canvas.width / 2 + Math.random() * 100 - 50, y: canvas.height / 2 + Math.random() * 100 - 50 };
+      delete topology._pendingLandmarkPos;
+      const landmark = {
+        id: 'landmark_' + Date.now(),
+        name,
+        type,
+        position: pos,
+        description: description || undefined,
+        isEntryPoint: isEntry,
+        isExitPoint: isExit,
+        visibleFromCameras: [],
+      };
+      if (!topology.landmarks) topology.landmarks = [];
+      topology.landmarks.push(landmark);
+      closeModal('add-landmark-modal');
+      document.getElementById('landmark-name-input').value = '';
+      document.getElementById('landmark-desc-input').value = '';
+      document.getElementById('landmark-entry-checkbox').checked = false;
+      document.getElementById('landmark-exit-checkbox').checked = false;
+      updateUI();
+      render();
+    }
+
+    function selectLandmark(id) {
+      selectedItem = { type: 'landmark', id };
+      const landmark = topology.landmarks.find(l => l.id === id);
+      showLandmarkProperties(landmark);
+      updateUI();
+      render();
+    }
+
+    function showLandmarkProperties(landmark) {
+      const panel = document.getElementById('properties-panel');
+      const cameraOptions = topology.cameras.map(c =>
+        '<label class="checkbox-group" style="margin-bottom: 5px;"><input type="checkbox" ' +
+        ((landmark.visibleFromCameras || []).includes(c.deviceId) ? 'checked' : '') +
+        ' onchange="toggleLandmarkCamera(\\'' + landmark.id + '\\', \\'' + c.deviceId + '\\', this.checked)">' +
+        c.name + '</label>'
+      ).join('');
+      panel.innerHTML = '<h3>Landmark Properties</h3>' +
+        '<div class="form-group"><label>Name</label><input type="text" value="' + landmark.name + '" onchange="updateLandmarkName(\\'' + landmark.id + '\\', this.value)"></div>' +
+        '<div class="form-group"><label>Type</label><select onchange="updateLandmarkType(\\'' + landmark.id + '\\', this.value)">' +
+        '<option value="structure"' + (landmark.type === 'structure' ? ' selected' : '') + '>Structure</option>' +
+        '<option value="feature"' + (landmark.type === 'feature' ? ' selected' : '') + '>Feature</option>' +
+        '<option value="boundary"' + (landmark.type === 'boundary' ? ' selected' : '') + '>Boundary</option>' +
+        '<option value="access"' + (landmark.type === 'access' ? ' selected' : '') + '>Access</option>' +
+        '<option value="vehicle"' + (landmark.type === 'vehicle' ? ' selected' : '') + '>Vehicle</option>' +
+        '<option value="neighbor"' + (landmark.type === 'neighbor' ? ' selected' : '') + '>Neighbor</option>' +
+        '<option value="zone"' + (landmark.type === 'zone' ? ' selected' : '') + '>Zone</option>' +
+        '<option value="street"' + (landmark.type === 'street' ? ' selected' : '') + '>Street</option>' +
+        '</select></div>' +
+        '<div class="form-group"><label>Description</label><input type="text" value="' + (landmark.description || '') + '" onchange="updateLandmarkDesc(\\'' + landmark.id + '\\', this.value)"></div>' +
+        '<div class="form-group"><label class="checkbox-group"><input type="checkbox" ' + (landmark.isEntryPoint ? 'checked' : '') + ' onchange="updateLandmarkEntry(\\'' + landmark.id + '\\', this.checked)">Entry Point</label></div>' +
+        '<div class="form-group"><label class="checkbox-group"><input type="checkbox" ' + (landmark.isExitPoint ? 'checked' : '') + ' onchange="updateLandmarkExit(\\'' + landmark.id + '\\', this.checked)">Exit Point</label></div>' +
+        '<div class="form-group"><label>Visible from Cameras</label>' + (cameraOptions || '<span style="color:#666;font-size:12px;">Add cameras first</span>') + '</div>' +
+        '<div class="form-group"><button class="btn" style="width: 100%; background: #f44336;" onclick="deleteLandmark(\\'' + landmark.id + '\\')">Delete Landmark</button></div>';
+    }
+
+    function updateLandmarkName(id, value) { const l = topology.landmarks.find(x => x.id === id); if (l) l.name = value; updateUI(); }
+    function updateLandmarkType(id, value) { const l = topology.landmarks.find(x => x.id === id); if (l) l.type = value; render(); }
+    function updateLandmarkDesc(id, value) { const l = topology.landmarks.find(x => x.id === id); if (l) l.description = value || undefined; }
+    function updateLandmarkEntry(id, value) { const l = topology.landmarks.find(x => x.id === id); if (l) l.isEntryPoint = value; }
+    function updateLandmarkExit(id, value) { const l = topology.landmarks.find(x => x.id === id); if (l) l.isExitPoint = value; }
+    function toggleLandmarkCamera(landmarkId, cameraId, visible) {
+      const l = topology.landmarks.find(x => x.id === landmarkId);
+      if (!l) return;
+      if (!l.visibleFromCameras) l.visibleFromCameras = [];
+      if (visible && !l.visibleFromCameras.includes(cameraId)) {
+        l.visibleFromCameras.push(cameraId);
+      } else if (!visible) {
+        l.visibleFromCameras = l.visibleFromCameras.filter(id => id !== cameraId);
+      }
+      // Also update camera's visibleLandmarks
+      const camera = topology.cameras.find(c => c.deviceId === cameraId);
+      if (camera) {
+        if (!camera.context) camera.context = {};
+        if (!camera.context.visibleLandmarks) camera.context.visibleLandmarks = [];
+        if (visible && !camera.context.visibleLandmarks.includes(landmarkId)) {
+          camera.context.visibleLandmarks.push(landmarkId);
+        } else if (!visible) {
+          camera.context.visibleLandmarks = camera.context.visibleLandmarks.filter(id => id !== landmarkId);
+        }
+      }
+    }
+    function deleteLandmark(id) {
+      if (!confirm('Delete this landmark?')) return;
+      topology.landmarks = topology.landmarks.filter(l => l.id !== id);
+      selectedItem = null;
+      document.getElementById('properties-panel').innerHTML = '<h3>Properties</h3><p style="color: #666;">Select an item to edit.</p>';
+      updateUI();
+      render();
     }
 
     async function saveTopology() {
@@ -361,6 +615,10 @@ export const EDITOR_HTML = `<!DOCTYPE html>
           ctx.strokeRect(currentDrawing.x, currentDrawing.y, currentDrawing.width, currentDrawing.height);
         }
       }
+      // Draw landmarks first (below cameras and connections)
+      for (const landmark of (topology.landmarks || [])) {
+        if (landmark.position) { drawLandmark(landmark); }
+      }
       for (const conn of topology.connections) {
         const fromCam = topology.cameras.find(c => c.deviceId === conn.fromCameraId);
         const toCam = topology.cameras.find(c => c.deviceId === conn.toCameraId);
@@ -371,6 +629,46 @@ export const EDITOR_HTML = `<!DOCTYPE html>
       for (const camera of topology.cameras) {
         if (camera.floorPlanPosition) { drawCamera(camera); }
       }
+    }
+
+    function drawLandmark(landmark) {
+      const pos = landmark.position;
+      const isSelected = selectedItem?.type === 'landmark' && selectedItem?.id === landmark.id;
+      // Color by type
+      const colors = {
+        structure: '#8b5cf6', // purple
+        feature: '#10b981', // green
+        boundary: '#f59e0b', // amber
+        access: '#3b82f6', // blue
+        vehicle: '#6366f1', // indigo
+        neighbor: '#ec4899', // pink
+        zone: '#14b8a6', // teal
+        street: '#6b7280', // gray
+      };
+      const color = colors[landmark.type] || '#888';
+      // Draw landmark marker
+      ctx.beginPath();
+      ctx.moveTo(pos.x, pos.y - 15);
+      ctx.lineTo(pos.x + 12, pos.y + 8);
+      ctx.lineTo(pos.x - 12, pos.y + 8);
+      ctx.closePath();
+      ctx.fillStyle = isSelected ? '#e94560' : color;
+      ctx.fill();
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      // Entry/exit indicators
+      if (landmark.isEntryPoint || landmark.isExitPoint) {
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y - 20, 5, 0, Math.PI * 2);
+        ctx.fillStyle = landmark.isEntryPoint ? '#4caf50' : '#ff9800';
+        ctx.fill();
+      }
+      // Label
+      ctx.fillStyle = '#fff';
+      ctx.font = '11px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(landmark.name, pos.x, pos.y + 25);
     }
 
     function drawCamera(camera) {
@@ -539,8 +837,17 @@ export const EDITOR_HTML = `<!DOCTYPE html>
       } else {
         connectionList.innerHTML = topology.connections.map(c => '<div class="connection-item ' + (selectedItem?.type === 'connection' && selectedItem?.id === c.id ? 'selected' : '') + '" onclick="selectConnection(\\'' + c.id + '\\')"><div class="camera-name">' + c.name + '</div><div class="camera-info">' + (c.transitTime.typical / 1000) + 's typical ' + (c.bidirectional ? '<->' : '->') + '</div></div>').join('');
       }
+      // Landmark list
+      const landmarkList = document.getElementById('landmark-list');
+      const landmarks = topology.landmarks || [];
+      if (landmarks.length === 0) {
+        landmarkList.innerHTML = '<div class="landmark-item" style="color: #666; text-align: center; cursor: default; padding: 8px;">No landmarks configured</div>';
+      } else {
+        landmarkList.innerHTML = landmarks.map(l => '<div class="camera-item ' + (selectedItem?.type === 'landmark' && selectedItem?.id === l.id ? 'selected' : '') + '" onclick="selectLandmark(\\'' + l.id + '\\')"><div class="camera-name">' + l.name + '</div><div class="camera-info">' + l.type + (l.isEntryPoint ? ' | Entry' : '') + (l.isExitPoint ? ' | Exit' : '') + '</div></div>').join('');
+      }
       document.getElementById('camera-count').textContent = topology.cameras.length;
       document.getElementById('connection-count').textContent = topology.connections.length;
+      document.getElementById('landmark-count').textContent = landmarks.length;
     }
 
     function selectCamera(deviceId) {
@@ -611,10 +918,18 @@ export const EDITOR_HTML = `<!DOCTYPE html>
       const y = e.clientY - rect.top;
 
       if (currentTool === 'select') {
+        // Check cameras first
         for (const camera of topology.cameras) {
           if (camera.floorPlanPosition) {
             const dist = Math.hypot(x - camera.floorPlanPosition.x, y - camera.floorPlanPosition.y);
-            if (dist < 25) { selectCamera(camera.deviceId); dragging = camera; return; }
+            if (dist < 25) { selectCamera(camera.deviceId); dragging = { type: 'camera', item: camera }; return; }
+          }
+        }
+        // Check landmarks
+        for (const landmark of (topology.landmarks || [])) {
+          if (landmark.position) {
+            const dist = Math.hypot(x - landmark.position.x, y - landmark.position.y);
+            if (dist < 20) { selectLandmark(landmark.id); dragging = { type: 'landmark', item: landmark }; return; }
           }
         }
       } else if (currentTool === 'wall') {
@@ -627,8 +942,10 @@ export const EDITOR_HTML = `<!DOCTYPE html>
         currentDrawing = { type: 'room', x: x, y: y, width: 0, height: 0 };
       } else if (currentTool === 'camera') {
         openAddCameraModal();
-        // Will position camera at click location after adding
         topology._pendingCameraPos = { x, y };
+      } else if (currentTool === 'landmark') {
+        openAddLandmarkModal();
+        topology._pendingLandmarkPos = { x, y };
       }
     });
 
@@ -638,8 +955,13 @@ export const EDITOR_HTML = `<!DOCTYPE html>
       const y = e.clientY - rect.top;
 
       if (dragging) {
-        dragging.floorPlanPosition.x = x;
-        dragging.floorPlanPosition.y = y;
+        if (dragging.type === 'camera') {
+          dragging.item.floorPlanPosition.x = x;
+          dragging.item.floorPlanPosition.y = y;
+        } else if (dragging.type === 'landmark') {
+          dragging.item.position.x = x;
+          dragging.item.position.y = y;
+        }
         render();
       } else if (isDrawing && currentDrawing) {
         if (currentDrawing.type === 'wall') {

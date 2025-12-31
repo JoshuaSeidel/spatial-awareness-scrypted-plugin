@@ -1,6 +1,6 @@
 {
   "name": "@blueharford/scrypted-spatial-awareness",
-  "version": "0.1.16",
+  "version": "0.2.0",
   "description": "Cross-camera object tracking for Scrypted NVR with spatial awareness",
   "author": "Joshua Seidel <blueharford>",
   "license": "Apache-2.0",

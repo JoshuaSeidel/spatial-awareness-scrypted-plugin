@@ -15,7 +15,14 @@ import sdk, {
   Readme,
 } from '@scrypted/sdk';
 import { StorageSettings } from '@scrypted/sdk/storage-settings';
-import { CameraTopology, createEmptyTopology } from './models/topology';
+import {
+  CameraTopology,
+  createEmptyTopology,
+  Landmark,
+  LandmarkSuggestion,
+  LANDMARK_TEMPLATES,
+  inferRelationships,
+} from './models/topology';
 import { TrackedObject } from './models/tracked-object';
 import { Alert, AlertRule, createDefaultRules } from './models/alert';
 import { TrackingState } from './state/tracking-state';
@@ -106,7 +113,21 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       type: 'boolean',
       defaultValue: true,
       description: 'Use LLM plugin (if installed) to generate descriptive alerts like "Man walking from garage towards front door"',
-      group: 'Tracking',
+      group: 'AI & Spatial Reasoning',
+    },
+    enableLandmarkLearning: {
+      title: 'Learn Landmarks from AI',
+      type: 'boolean',
+      defaultValue: true,
+      description: 'Allow AI to suggest new landmarks based on detected objects and camera context',
+      group: 'AI & Spatial Reasoning',
+    },
+    landmarkConfidenceThreshold: {
+      title: 'Landmark Suggestion Confidence',
+      type: 'number',
+      defaultValue: 0.7,
+      description: 'Minimum AI confidence (0-1) to suggest a landmark',
+      group: 'AI & Spatial Reasoning',
     },
 
     // MQTT Settings
@@ -270,6 +291,8 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       loiteringThreshold: (this.storageSettings.values.loiteringThreshold as number || 3) * 1000,
       objectAlertCooldown: (this.storageSettings.values.objectAlertCooldown as number || 30) * 1000,
       useLlmDescriptions: this.storageSettings.values.useLlmDescriptions as boolean ?? true,
+      enableLandmarkLearning: this.storageSettings.values.enableLandmarkLearning as boolean ?? true,
+      landmarkConfidenceThreshold: this.storageSettings.values.landmarkConfidenceThreshold as number ?? 0.7,
     };
 
     this.trackingEngine = new TrackingEngine(
@@ -279,6 +302,12 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       config,
       this.console
     );
+
+    // Set up callback to save topology changes (e.g., from accepted landmark suggestions)
+    this.trackingEngine.setTopologyChangeCallback((updatedTopology) => {
+      this.storage.setItem('topology', JSON.stringify(updatedTopology));
+      this.console.log('Topology auto-saved after change');
+    });
 
     await this.trackingEngine.startTracking();
     this.console.log('Tracking engine started');
@@ -546,7 +575,9 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       key === 'useVisualMatching' ||
       key === 'loiteringThreshold' ||
       key === 'objectAlertCooldown' ||
-      key === 'useLlmDescriptions'
+      key === 'useLlmDescriptions' ||
+      key === 'enableLandmarkLearning' ||
+      key === 'landmarkConfidenceThreshold'
     ) {
       const topologyJson = this.storage.getItem('topology');
       if (topologyJson) {
@@ -607,6 +638,34 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
 
       if (path.endsWith('/api/floor-plan')) {
         return this.handleFloorPlanRequest(request, response);
+      }
+
+      if (path.endsWith('/api/landmarks')) {
+        return this.handleLandmarksRequest(request, response);
+      }
+
+      if (path.match(/\/api\/landmarks\/[\w-]+$/)) {
+        const landmarkId = path.split('/').pop()!;
+        return this.handleLandmarkRequest(landmarkId, request, response);
+      }
+
+      if (path.endsWith('/api/landmark-suggestions')) {
+        return this.handleLandmarkSuggestionsRequest(request, response);
+      }
+
+      if (path.match(/\/api\/landmark-suggestions\/[\w-]+\/(accept|reject)$/)) {
+        const parts = path.split('/');
+        const action = parts.pop()!;
+        const suggestionId = parts.pop()!;
+        return this.handleSuggestionActionRequest(suggestionId, action, response);
+      }
+
+      if (path.endsWith('/api/landmark-templates')) {
+        return this.handleLandmarkTemplatesRequest(response);
+      }
+
+      if (path.endsWith('/api/infer-relationships')) {
+        return this.handleInferRelationshipsRequest(response);
       }
 
       // UI Routes
@@ -789,6 +848,210 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
         });
       }
     }
+  }
+
+  private handleLandmarksRequest(request: HttpRequest, response: HttpResponse): void {
+    const topology = this.getTopology();
+    if (!topology) {
+      response.send(JSON.stringify({ landmarks: [] }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+      return;
+    }
+
+    if (request.method === 'GET') {
+      response.send(JSON.stringify({
+        landmarks: topology.landmarks || [],
+      }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } else if (request.method === 'POST') {
+      try {
+        const landmark = JSON.parse(request.body!) as Landmark;
+        if (!landmark.id) {
+          landmark.id = `landmark_${Date.now()}`;
+        }
+        if (!topology.landmarks) {
+          topology.landmarks = [];
+        }
+        topology.landmarks.push(landmark);
+        this.storage.setItem('topology', JSON.stringify(topology));
+        if (this.trackingEngine) {
+          this.trackingEngine.updateTopology(topology);
+        }
+        response.send(JSON.stringify({ success: true, landmark }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      } catch (e) {
+        response.send(JSON.stringify({ error: 'Invalid landmark data' }), {
+          code: 400,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+    }
+  }
+
+  private handleLandmarkRequest(
+    landmarkId: string,
+    request: HttpRequest,
+    response: HttpResponse
+  ): void {
+    const topology = this.getTopology();
+    if (!topology) {
+      response.send(JSON.stringify({ error: 'No topology configured' }), {
+        code: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+      return;
+    }
+
+    const landmarkIndex = topology.landmarks?.findIndex(l => l.id === landmarkId) ?? -1;
+
+    if (request.method === 'GET') {
+      const landmark = topology.landmarks?.[landmarkIndex];
+      if (landmark) {
+        response.send(JSON.stringify(landmark), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      } else {
+        response.send(JSON.stringify({ error: 'Landmark not found' }), {
+          code: 404,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+    } else if (request.method === 'PUT') {
+      try {
+        const updates = JSON.parse(request.body!) as Partial<Landmark>;
+        if (landmarkIndex >= 0) {
+          topology.landmarks![landmarkIndex] = {
+            ...topology.landmarks![landmarkIndex],
+            ...updates,
+            id: landmarkId, // Preserve ID
+          };
+          this.storage.setItem('topology', JSON.stringify(topology));
+          if (this.trackingEngine) {
+            this.trackingEngine.updateTopology(topology);
+          }
+          response.send(JSON.stringify({ success: true, landmark: topology.landmarks![landmarkIndex] }), {
+            headers: { 'Content-Type': 'application/json' },
+          });
+        } else {
+          response.send(JSON.stringify({ error: 'Landmark not found' }), {
+            code: 404,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+      } catch (e) {
+        response.send(JSON.stringify({ error: 'Invalid landmark data' }), {
+          code: 400,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+    } else if (request.method === 'DELETE') {
+      if (landmarkIndex >= 0) {
+        topology.landmarks!.splice(landmarkIndex, 1);
+        this.storage.setItem('topology', JSON.stringify(topology));
+        if (this.trackingEngine) {
+          this.trackingEngine.updateTopology(topology);
+        }
+        response.send(JSON.stringify({ success: true }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      } else {
+        response.send(JSON.stringify({ error: 'Landmark not found' }), {
+          code: 404,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+    }
+  }
+
+  private handleLandmarkSuggestionsRequest(request: HttpRequest, response: HttpResponse): void {
+    if (!this.trackingEngine) {
+      response.send(JSON.stringify({ suggestions: [] }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+      return;
+    }
+
+    const suggestions = this.trackingEngine.getPendingLandmarkSuggestions();
+    response.send(JSON.stringify({
+      suggestions,
+      count: suggestions.length,
+    }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  private handleSuggestionActionRequest(
+    suggestionId: string,
+    action: string,
+    response: HttpResponse
+  ): void {
+    if (!this.trackingEngine) {
+      response.send(JSON.stringify({ error: 'Tracking engine not running' }), {
+        code: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+      return;
+    }
+
+    if (action === 'accept') {
+      const landmark = this.trackingEngine.acceptLandmarkSuggestion(suggestionId);
+      if (landmark) {
+        response.send(JSON.stringify({ success: true, landmark }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      } else {
+        response.send(JSON.stringify({ error: 'Suggestion not found' }), {
+          code: 404,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+    } else if (action === 'reject') {
+      const success = this.trackingEngine.rejectLandmarkSuggestion(suggestionId);
+      if (success) {
+        response.send(JSON.stringify({ success: true }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      } else {
+        response.send(JSON.stringify({ error: 'Suggestion not found' }), {
+          code: 404,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+    } else {
+      response.send(JSON.stringify({ error: 'Invalid action' }), {
+        code: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+  }
+
+  private handleLandmarkTemplatesRequest(response: HttpResponse): void {
+    response.send(JSON.stringify({
+      templates: LANDMARK_TEMPLATES,
+    }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  private handleInferRelationshipsRequest(response: HttpResponse): void {
+    const topology = this.getTopology();
+    if (!topology) {
+      response.send(JSON.stringify({ relationships: [] }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+      return;
+    }
+
+    const inferred = inferRelationships(topology);
+    response.send(JSON.stringify({
+      relationships: inferred,
+      count: inferred.length,
+    }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 
   private serveEditorUI(response: HttpResponse): void {
