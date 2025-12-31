@@ -432,8 +432,17 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
   // ==================== Settings Implementation ====================
 
   async getSettings(): Promise<Setting[]> {
-    const settings = await this.storageSettings.getSettings();
+    const baseSettings = await this.storageSettings.getSettings();
 
+    // Build settings in desired order
+    const settings: Setting[] = [];
+
+    // Helper to find and add settings from baseSettings by group
+    const addGroup = (group: string) => {
+      baseSettings.filter(s => s.group === group).forEach(s => settings.push(s));
+    };
+
+    // ==================== 1. Getting Started ====================
     // Training Mode button that opens mobile-friendly training UI in modal
     const trainingOnclickCode = `(function(){var e=document.getElementById('sa-training-modal');if(e)e.remove();var m=document.createElement('div');m.id='sa-training-modal';m.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.85);z-index:2147483647;display:flex;align-items:center;justify-content:center;';var c=document.createElement('div');c.style.cssText='width:min(420px,95vw);height:92vh;max-height:900px;background:#121212;border-radius:8px;overflow:hidden;position:relative;box-shadow:0 8px 32px rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.1);';var b=document.createElement('button');b.innerHTML='×';b.style.cssText='position:absolute;top:8px;right:8px;z-index:2147483647;background:rgba(255,255,255,0.1);color:white;border:none;width:32px;height:32px;border-radius:4px;font-size:18px;cursor:pointer;line-height:1;';b.onclick=function(){m.remove();};var f=document.createElement('iframe');f.src='/endpoint/@blueharford/scrypted-spatial-awareness/ui/training';f.style.cssText='width:100%;height:100%;border:none;';c.appendChild(b);c.appendChild(f);m.appendChild(c);m.onclick=function(ev){if(ev.target===m)m.remove();};document.body.appendChild(m);})()`;
 
@@ -517,6 +526,7 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       group: 'Getting Started',
     });
 
+    // ==================== 2. Topology ====================
     // Topology editor button that opens modal overlay (appended to body for proper z-index)
     const onclickCode = `(function(){var e=document.getElementById('sa-topology-modal');if(e)e.remove();var m=document.createElement('div');m.id='sa-topology-modal';m.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.85);z-index:2147483647;display:flex;align-items:center;justify-content:center;';var c=document.createElement('div');c.style.cssText='width:95vw;height:92vh;max-width:1800px;background:#121212;border-radius:8px;overflow:hidden;position:relative;box-shadow:0 8px 32px rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.1);';var b=document.createElement('button');b.innerHTML='×';b.style.cssText='position:absolute;top:8px;right:8px;z-index:2147483647;background:rgba(255,255,255,0.1);color:white;border:none;width:32px;height:32px;border-radius:4px;font-size:18px;cursor:pointer;line-height:1;';b.onclick=function(){m.remove();};var f=document.createElement('iframe');f.src='/endpoint/@blueharford/scrypted-spatial-awareness/ui/editor';f.style.cssText='width:100%;height:100%;border:none;';c.appendChild(b);c.appendChild(f);m.appendChild(c);m.onclick=function(ev){if(ev.target===m)m.remove();};document.body.appendChild(m);})()`;
 
@@ -568,6 +578,10 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       group: 'Topology',
     });
 
+    // ==================== 3. Cameras ====================
+    addGroup('Cameras');
+
+    // ==================== 4. Status ====================
     // Add status display
     const activeCount = this.trackingState.getActiveCount();
     const topologyJson = this.storage.getItem('topology');
@@ -613,6 +627,15 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       });
     }
 
+    // ==================== 5. Tracking ====================
+    addGroup('Tracking');
+
+    // ==================== 6. AI & Spatial Reasoning ====================
+    addGroup('AI & Spatial Reasoning');
+
+    // ==================== 7. Alerts ====================
+    addGroup('Alerts');
+
     // Add alert rules configuration UI
     const alertRules = this.alertManager.getRules();
     const rulesHtml = this.generateAlertRulesHtml(alertRules);
@@ -623,6 +646,9 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       value: rulesHtml,
       group: 'Alerts',
     });
+
+    // ==================== 8. MQTT Integration ====================
+    addGroup('MQTT Integration');
 
     return settings;
   }
