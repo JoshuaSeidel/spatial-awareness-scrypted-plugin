@@ -116,7 +116,7 @@ export class SpatialReasoningEngine {
     }
 
     // Landmark contexts
-    for (const landmark of this.topology.landmarks) {
+    for (const landmark of this.topology.landmarks || []) {
       this.contextChunks.push({
         id: `landmark_${landmark.id}`,
         type: 'landmark',

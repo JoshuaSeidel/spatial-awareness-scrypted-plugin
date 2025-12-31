@@ -324,7 +324,7 @@ export function findCamera(topology: CameraTopology, deviceId: string): CameraNo
 
 /** Finds a landmark by ID */
 export function findLandmark(topology: CameraTopology, landmarkId: string): Landmark | undefined {
-  return topology.landmarks.find(l => l.id === landmarkId);
+  return topology.landmarks?.find(l => l.id === landmarkId);
 }
 
 /** Finds connections from a camera */
@@ -400,7 +400,7 @@ export function inferRelationships(topology: CameraTopology, proximityThreshold:
       entities.push({ id: camera.deviceId, position: camera.floorPlanPosition, type: 'camera' });
     }
   }
-  for (const landmark of topology.landmarks) {
+  for (const landmark of topology.landmarks || []) {
     entities.push({ id: landmark.id, position: landmark.position, type: 'landmark' });
   }
 
@@ -436,9 +436,9 @@ export function generateTopologyDescription(topology: CameraTopology): string {
   }
 
   // Landmarks
-  if (topology.landmarks.length > 0) {
+  if (topology.landmarks?.length > 0) {
     lines.push('\nLandmarks on property:');
-    for (const landmark of topology.landmarks) {
+    for (const landmark of topology.landmarks || []) {
       let desc = `- ${landmark.name} (${landmark.type})`;
       if (landmark.description) desc += `: ${landmark.description}`;
       if (landmark.isEntryPoint) desc += ' [Entry point]';
