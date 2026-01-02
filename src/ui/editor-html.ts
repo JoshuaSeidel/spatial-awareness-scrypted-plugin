@@ -71,6 +71,19 @@ export const EDITOR_HTML = `<!DOCTYPE html>
         <p>Topology Editor</p>
       </div>
       <div class="sidebar-content">
+        <div class="section" style="background: #1a3a5c; margin: -10px -15px 10px -15px; padding: 15px;">
+          <div class="section-title" style="margin-bottom: 10px;">
+            <span>Floor Plan Scale</span>
+          </div>
+          <div style="display: flex; gap: 10px; align-items: center;">
+            <input type="number" id="scale-input" value="5" min="1" max="50" style="width: 60px; padding: 6px; background: #0f3460; border: 1px solid #1a4a7a; border-radius: 4px; color: #fff;" onchange="updateScale(this.value)">
+            <span style="font-size: 12px; color: #888;">pixels per foot</span>
+            <button class="btn btn-small" onclick="openScaleHelper()" style="margin-left: auto;">Help</button>
+          </div>
+          <div style="font-size: 11px; color: #666; margin-top: 8px;">
+            Tip: If your floor plan is 800px wide and represents 80ft, scale = 10 px/ft
+          </div>
+        </div>
         <div class="section">
           <div class="section-title">
             <span>Cameras</span>
@@ -379,6 +392,14 @@ export const EDITOR_HTML = `<!DOCTYPE html>
     let currentDrawing = null;
     let blankCanvasMode = false;
 
+    // Floor plan scale: pixels per foot (default assumes ~5 pixels per foot for a typical floor plan)
+    // User can adjust this by setting the scale
+    let floorPlanScale = 5; // pixels per foot
+
+    // Helper functions for scale conversion
+    function feetToPixels(feet) { return feet * floorPlanScale; }
+    function pixelsToFeet(pixels) { return pixels / floorPlanScale; }
+
     // Zone drawing state
     let zoneDrawingMode = false;
     let currentZonePoints = [];
@@ -434,6 +455,12 @@ export const EDITOR_HTML = `<!DOCTYPE html>
         if (response.ok) {
           topology = await response.json();
           if (!topology.drawings) topology.drawings = [];
+          // Load floor plan scale if saved
+          if (topology.floorPlanScale) {
+            floorPlanScale = topology.floorPlanScale;
+            const scaleInput = document.getElementById('scale-input');
+            if (scaleInput) scaleInput.value = floorPlanScale;
+          }
           // Load floor plan from separate storage (handles legacy imageData in topology too)
           if (topology.floorPlan?.imageData) {
             // Legacy: imageData was stored in topology
@@ -1603,6 +1630,8 @@ export const EDITOR_HTML = `<!DOCTYPE html>
     function showCameraProperties(camera) {
       const panel = document.getElementById('properties-panel');
       const fov = camera.fov || { mode: 'simple', angle: 90, direction: 0, range: 80 };
+      // Convert stored pixel range to feet for display
+      const rangeInFeet = Math.round(pixelsToFeet(fov.range || 80));
       panel.innerHTML = '<h3>Camera Properties</h3>' +
         '<div class="form-group"><label>Name</label><input type="text" value="' + camera.name + '" onchange="updateCameraName(\\'' + camera.deviceId + '\\', this.value)"></div>' +
         '<div class="form-group"><label class="checkbox-group"><input type="checkbox" ' + (camera.isEntryPoint ? 'checked' : '') + ' onchange="updateCameraEntry(\\'' + camera.deviceId + '\\', this.checked)">Entry Point</label></div>' +
@@ -1610,7 +1639,8 @@ export const EDITOR_HTML = `<!DOCTYPE html>
         '<h4 style="margin-top: 15px; margin-bottom: 10px; color: #888;">Field of View</h4>' +
         '<div class="form-group"><label>Direction (0=up, 90=right)</label><input type="number" value="' + Math.round(fov.direction || 0) + '" min="0" max="359" onchange="updateCameraFov(\\'' + camera.deviceId + '\\', \\'direction\\', this.value)"></div>' +
         '<div class="form-group"><label>FOV Angle (degrees)</label><input type="number" value="' + (fov.angle || 90) + '" min="30" max="180" onchange="updateCameraFov(\\'' + camera.deviceId + '\\', \\'angle\\', this.value)"></div>' +
-        '<div class="form-group"><label>Range (pixels)</label><input type="number" value="' + (fov.range || 80) + '" min="20" max="300" onchange="updateCameraFov(\\'' + camera.deviceId + '\\', \\'range\\', this.value)"></div>' +
+        '<div class="form-group"><label>Range (feet)</label><input type="number" value="' + rangeInFeet + '" min="5" max="200" onchange="updateCameraFovRange(\\'' + camera.deviceId + '\\', this.value)"></div>' +
+        '<div style="font-size: 11px; color: #666; margin-top: -10px; margin-bottom: 15px;">~' + (fov.range || 80) + ' pixels at current scale</div>' +
         '<div class="form-group"><button class="btn" style="width: 100%; background: #f44336;" onclick="deleteCamera(\\'' + camera.deviceId + '\\')">Delete Camera</button></div>';
     }
 
@@ -1628,6 +1658,36 @@ export const EDITOR_HTML = `<!DOCTYPE html>
       if (!camera.fov) camera.fov = { mode: 'simple', angle: 90, direction: 0, range: 80 };
       camera.fov[field] = parseFloat(value);
       render();
+    }
+    function updateCameraFovRange(id, feetValue) {
+      // Convert feet to pixels and store
+      const camera = topology.cameras.find(c => c.deviceId === id);
+      if (!camera) return;
+      if (!camera.fov) camera.fov = { mode: 'simple', angle: 90, direction: 0, range: 80 };
+      camera.fov.range = feetToPixels(parseFloat(feetValue));
+      render();
+      // Update the pixel display
+      showCameraProperties(camera);
+    }
+    function updateScale(value) {
+      floorPlanScale = parseFloat(value) || 5;
+      // Store in topology for persistence
+      topology.floorPlanScale = floorPlanScale;
+      render();
+      setStatus('Scale updated: ' + floorPlanScale + ' pixels per foot', 'success');
+    }
+    function openScaleHelper() {
+      alert('How to determine your floor plan scale:\\n\\n' +
+        '1. Measure a known distance on your floor plan in pixels\\n' +
+        '   (e.g., measure a room that you know is 20 feet wide)\\n\\n' +
+        '2. Divide the pixel width by the real width in feet\\n' +
+        '   Example: 200 pixels / 20 feet = 10 pixels per foot\\n\\n' +
+        '3. Enter that value in the scale field\\n\\n' +
+        'Common scales:\\n' +
+        '- Small floor plan (fits on screen): 3-5 px/ft\\n' +
+        '- Medium floor plan: 5-10 px/ft\\n' +
+        '- Large/detailed floor plan: 10-20 px/ft\\n\\n' +
+        'Tip: Most outdoor cameras see 30-50 feet, indoor 15-30 feet');
     }
     function updateConnectionName(id, value) { const conn = topology.connections.find(c => c.id === id); if (conn) conn.name = value; updateUI(); }
     function updateTransitTime(id, field, value) { const conn = topology.connections.find(c => c.id === id); if (conn) conn.transitTime[field] = parseInt(value) * 1000; }
