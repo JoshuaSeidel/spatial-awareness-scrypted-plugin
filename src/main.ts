@@ -1824,8 +1824,7 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
     let updated = false;
 
     if (suggestion.type === 'landmark' && suggestion.landmark) {
-      // Calculate a reasonable position for the landmark
-      // Use the first visible camera's position as a starting point, or canvas center
+      // Calculate position for the landmark WITHIN the camera's field of view
       let position = suggestion.landmark.position;
       if (!position || (position.x === 0 && position.y === 0)) {
         // Find a camera that can see this landmark
@@ -1833,12 +1832,35 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
         const camera = visibleCameraId ? topology.cameras.find(c => c.deviceId === visibleCameraId) : null;
 
         if (camera?.floorPlanPosition) {
-          // Position near the camera with some offset
-          const offset = (topology.landmarks?.length || 0) * 30;
+          // Get camera's FOV direction and range (cast to any for flexible access)
+          const fov = (camera.fov || { mode: 'simple', angle: 90, direction: 0, range: 80 }) as any;
+          const direction = fov.direction || 0;
+          const range = fov.range || 80;
+          const fovAngle = fov.angle || 90;
+
+          // Count existing landmarks from this camera to spread them out
+          const existingFromCamera = (topology.landmarks || []).filter(l =>
+            l.visibleFromCameras?.includes(visibleCameraId)
+          ).length;
+
+          // Calculate position in front of camera within its FOV
+          // Convert direction to radians (0 = up/north, 90 = right/east)
+          const dirRad = (direction - 90) * Math.PI / 180;
+          const halfFov = (fovAngle / 2) * Math.PI / 180;
+
+          // Spread landmarks across the FOV cone at varying distances
+          const angleOffset = (existingFromCamera % 3 - 1) * halfFov * 0.6; // -0.6, 0, +0.6 of half FOV
+          const distanceMultiplier = 0.5 + (existingFromCamera % 2) * 0.3; // 50% or 80% of range
+
+          const finalAngle = dirRad + angleOffset;
+          const distance = range * distanceMultiplier;
+
           position = {
-            x: camera.floorPlanPosition.x + 50 + (offset % 100),
-            y: camera.floorPlanPosition.y + 50 + Math.floor(offset / 100) * 30,
+            x: camera.floorPlanPosition.x + Math.cos(finalAngle) * distance,
+            y: camera.floorPlanPosition.y + Math.sin(finalAngle) * distance,
           };
+
+          this.console.log(`[Discovery] Placing landmark "${suggestion.landmark.name}" in ${camera.name}'s FOV: dir=${direction}°, dist=${distance.toFixed(0)}px`);
         } else {
           // Position in a grid pattern starting from center
           const landmarkCount = topology.landmarks?.length || 0;
@@ -1882,17 +1904,69 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
         ? topology.cameras.find(c => c.deviceId === sourceCameras[0] || c.name === sourceCameras[0])
         : null;
 
-      // Create a default polygon near the camera or at a default location
-      let centerX = 300;
-      let centerY = 200;
-      if (camera?.floorPlanPosition) {
-        centerX = camera.floorPlanPosition.x;
-        centerY = camera.floorPlanPosition.y + 80;
-      }
-
-      // Create a rectangular zone (user can edit later)
-      const size = 100;
+      // Create zone polygon WITHIN the camera's field of view
+      let polygon: { x: number; y: number }[] = [];
       const timestamp = Date.now();
+
+      if (camera?.floorPlanPosition) {
+        // Get camera's FOV direction and range (cast to any for flexible access)
+        const fov = (camera.fov || { mode: 'simple', angle: 90, direction: 0, range: 80 }) as any;
+        const direction = fov.direction || 0;
+        const range = fov.range || 80;
+        const fovAngle = fov.angle || 90;
+
+        // Convert direction to radians (0 = up/north, 90 = right/east)
+        const dirRad = (direction - 90) * Math.PI / 180;
+        const halfFov = (fovAngle / 2) * Math.PI / 180;
+
+        // Count existing zones from this camera to offset new ones
+        const existingFromCamera = (topology.drawnZones || []).filter((z: any) =>
+          z.linkedCameras?.includes(sourceCameras[0])
+        ).length;
+
+        // Create a wedge-shaped zone within the camera's FOV
+        // Offset based on existing zones to avoid overlap
+        const innerRadius = range * 0.3 + existingFromCamera * 20;
+        const outerRadius = range * 0.8 + existingFromCamera * 20;
+
+        // Use a portion of the FOV for each zone
+        const zoneSpread = halfFov * 0.7; // 70% of half FOV
+
+        const camX = camera.floorPlanPosition.x;
+        const camY = camera.floorPlanPosition.y;
+
+        // Create arc polygon (wedge shape)
+        const steps = 8;
+        // Inner arc (from left to right)
+        for (let i = 0; i <= steps; i++) {
+          const angle = dirRad - zoneSpread + (zoneSpread * 2 * i / steps);
+          polygon.push({
+            x: camX + Math.cos(angle) * innerRadius,
+            y: camY + Math.sin(angle) * innerRadius,
+          });
+        }
+        // Outer arc (from right to left)
+        for (let i = steps; i >= 0; i--) {
+          const angle = dirRad - zoneSpread + (zoneSpread * 2 * i / steps);
+          polygon.push({
+            x: camX + Math.cos(angle) * outerRadius,
+            y: camY + Math.sin(angle) * outerRadius,
+          });
+        }
+
+        this.console.log(`[Discovery] Creating zone "${zone.name}" in ${camera.name}'s FOV: dir=${direction}°`);
+      } else {
+        // Fallback: rectangular zone at default location
+        const centerX = 300 + (topology.drawnZones?.length || 0) * 120;
+        const centerY = 200;
+        const size = 100;
+        polygon = [
+          { x: centerX - size/2, y: centerY - size/2 },
+          { x: centerX + size/2, y: centerY - size/2 },
+          { x: centerX + size/2, y: centerY + size/2 },
+          { x: centerX - size/2, y: centerY + size/2 },
+        ];
+      }
 
       // 1. Create DrawnZone (visual on floor plan)
       const drawnZone = {
@@ -1900,12 +1974,7 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
         name: zone.name,
         type: (zone.type || 'custom') as DrawnZoneType,
         description: zone.description,
-        polygon: [
-          { x: centerX - size/2, y: centerY - size/2 },
-          { x: centerX + size/2, y: centerY - size/2 },
-          { x: centerX + size/2, y: centerY + size/2 },
-          { x: centerX - size/2, y: centerY + size/2 },
-        ] as any,
+        polygon: polygon as any,
         linkedCameras: sourceCameras,
       };
 
