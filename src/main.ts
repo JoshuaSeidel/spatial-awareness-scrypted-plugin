@@ -24,6 +24,7 @@ import {
   LandmarkSuggestion,
   LANDMARK_TEMPLATES,
   inferRelationships,
+  DrawnZoneType,
 } from './models/topology';
 import { TrackedObject } from './models/tracked-object';
 import { Alert, AlertRule, createDefaultRules } from './models/alert';
@@ -1819,12 +1820,39 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
     let updated = false;
 
     if (suggestion.type === 'landmark' && suggestion.landmark) {
+      // Calculate a reasonable position for the landmark
+      // Use the first visible camera's position as a starting point, or canvas center
+      let position = suggestion.landmark.position;
+      if (!position || (position.x === 0 && position.y === 0)) {
+        // Find a camera that can see this landmark
+        const visibleCameraId = suggestion.landmark.visibleFromCameras?.[0];
+        const camera = visibleCameraId ? topology.cameras.find(c => c.deviceId === visibleCameraId) : null;
+
+        if (camera?.floorPlanPosition) {
+          // Position near the camera with some offset
+          const offset = (topology.landmarks?.length || 0) * 30;
+          position = {
+            x: camera.floorPlanPosition.x + 50 + (offset % 100),
+            y: camera.floorPlanPosition.y + 50 + Math.floor(offset / 100) * 30,
+          };
+        } else {
+          // Position in a grid pattern starting from center
+          const landmarkCount = topology.landmarks?.length || 0;
+          const gridSize = 80;
+          const cols = 5;
+          position = {
+            x: 200 + (landmarkCount % cols) * gridSize,
+            y: 100 + Math.floor(landmarkCount / cols) * gridSize,
+          };
+        }
+      }
+
       // Add new landmark to topology
       const landmark: Landmark = {
         id: `landmark_${Date.now()}`,
         name: suggestion.landmark.name!,
         type: suggestion.landmark.type!,
-        position: suggestion.landmark.position || { x: 0, y: 0 },
+        position,
         description: suggestion.landmark.description,
         visibleFromCameras: suggestion.landmark.visibleFromCameras,
         aiSuggested: true,
@@ -1837,16 +1865,79 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       topology.landmarks.push(landmark);
       updated = true;
 
-      this.console.log(`[Discovery] Added landmark: ${landmark.name}`);
+      this.console.log(`[Discovery] Added landmark: ${landmark.name} at (${position.x}, ${position.y})`);
+    }
+
+    if (suggestion.type === 'zone' && suggestion.zone) {
+      // Create a drawn zone from the discovery zone
+      const zone = suggestion.zone;
+
+      // Find cameras that see this zone type to determine position
+      const cameraWithZone = suggestion.sourceCameras?.[0];
+      const camera = cameraWithZone ? topology.cameras.find(c => c.deviceId === cameraWithZone || c.name === cameraWithZone) : null;
+
+      // Create a default polygon near the camera or at a default location
+      let centerX = 300;
+      let centerY = 200;
+      if (camera?.floorPlanPosition) {
+        centerX = camera.floorPlanPosition.x;
+        centerY = camera.floorPlanPosition.y + 80;
+      }
+
+      // Create a rectangular zone (user can edit later)
+      const size = 100;
+      const drawnZone = {
+        id: `zone_${Date.now()}`,
+        name: zone.name,
+        type: (zone.type || 'custom') as DrawnZoneType,
+        description: zone.description,
+        polygon: [
+          { x: centerX - size/2, y: centerY - size/2 },
+          { x: centerX + size/2, y: centerY - size/2 },
+          { x: centerX + size/2, y: centerY + size/2 },
+          { x: centerX - size/2, y: centerY + size/2 },
+        ] as any,
+      };
+
+      if (!topology.drawnZones) {
+        topology.drawnZones = [];
+      }
+      topology.drawnZones.push(drawnZone);
+      updated = true;
+
+      this.console.log(`[Discovery] Added zone: ${zone.name} (${zone.type})`);
     }
 
     if (suggestion.type === 'connection' && suggestion.connection) {
       // Add new connection to topology
       const conn = suggestion.connection;
+
+      // Ensure cameras have floor plan positions for visibility
+      const fromCamera = topology.cameras.find(c => c.deviceId === conn.fromCameraId || c.name === conn.fromCameraId);
+      const toCamera = topology.cameras.find(c => c.deviceId === conn.toCameraId || c.name === conn.toCameraId);
+
+      // Auto-assign floor plan positions if missing
+      if (fromCamera && !fromCamera.floorPlanPosition) {
+        const idx = topology.cameras.indexOf(fromCamera);
+        fromCamera.floorPlanPosition = {
+          x: 150 + (idx % 3) * 200,
+          y: 150 + Math.floor(idx / 3) * 150,
+        };
+        this.console.log(`[Discovery] Auto-positioned camera: ${fromCamera.name}`);
+      }
+      if (toCamera && !toCamera.floorPlanPosition) {
+        const idx = topology.cameras.indexOf(toCamera);
+        toCamera.floorPlanPosition = {
+          x: 150 + (idx % 3) * 200,
+          y: 150 + Math.floor(idx / 3) * 150,
+        };
+        this.console.log(`[Discovery] Auto-positioned camera: ${toCamera.name}`);
+      }
+
       const newConnection = {
         id: `conn_${Date.now()}`,
-        fromCameraId: conn.fromCameraId,
-        toCameraId: conn.toCameraId,
+        fromCameraId: fromCamera?.deviceId || conn.fromCameraId,
+        toCameraId: toCamera?.deviceId || conn.toCameraId,
         bidirectional: conn.bidirectional,
         // Default exit/entry zones covering full frame
         exitZone: [[0, 0], [100, 0], [100, 100], [0, 100]] as [number, number][],
@@ -1862,7 +1953,7 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       topology.connections.push(newConnection);
       updated = true;
 
-      this.console.log(`[Discovery] Added connection: ${conn.fromCameraId} -> ${conn.toCameraId}`);
+      this.console.log(`[Discovery] Added connection: ${fromCamera?.name || conn.fromCameraId} -> ${toCamera?.name || conn.toCameraId}`);
     }
 
     if (updated) {

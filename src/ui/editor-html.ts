@@ -1038,6 +1038,12 @@ export const EDITOR_HTML = `<!DOCTYPE html>
         for (let i = 1; i < currentZonePoints.length; i++) {
           ctx.lineTo(currentZonePoints[i].x, currentZonePoints[i].y);
         }
+        // Close the polygon if we have 3+ points
+        if (currentZonePoints.length >= 3) {
+          ctx.closePath();
+          ctx.fillStyle = color;
+          ctx.fill();
+        }
         ctx.strokeStyle = strokeColor;
         ctx.lineWidth = 2;
         ctx.stroke();

@@ -305,7 +305,7 @@ export class TopologyDiscoveryEngine {
               ],
             },
           ],
-          max_tokens: 500,
+          max_tokens: 1500,
           temperature: 0.3,
         });
 
@@ -530,7 +530,7 @@ export class TopologyDiscoveryEngine {
 
       const result = await llm.getChatCompletion({
         messages: [{ role: 'user', content: prompt }],
-        max_tokens: 800,
+        max_tokens: 2000,
         temperature: 0.4,
       });
 
