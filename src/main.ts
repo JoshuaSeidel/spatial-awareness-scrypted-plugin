@@ -695,7 +695,10 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
     // ==================== 6. AI & Spatial Reasoning ====================
     addGroup('AI & Spatial Reasoning');
 
-    // ==================== 7. Alerts ====================
+    // ==================== 7. Auto-Topology Discovery ====================
+    addGroup('Auto-Topology Discovery');
+
+    // ==================== 8. Alerts ====================
     addGroup('Alerts');
 
     // Add alert rules configuration UI
@@ -709,7 +712,7 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       group: 'Alerts',
     });
 
-    // ==================== 8. MQTT Integration ====================
+    // ==================== 9. MQTT Integration ====================
     addGroup('MQTT Integration');
 
     return settings;

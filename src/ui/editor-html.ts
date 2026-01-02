@@ -659,11 +659,33 @@ export const EDITOR_HTML = `<!DOCTYPE html>
       }).join('');
     }
 
+    let scanPollingInterval = null;
+
     async function runDiscoveryScan() {
       const scanBtn = document.getElementById('scan-now-btn');
+      const statusText = document.getElementById('discovery-status-text');
       scanBtn.disabled = true;
       scanBtn.textContent = 'Scanning...';
       setStatus('Starting discovery scan...', 'warning');
+
+      // Start polling for live status updates
+      let camerasDone = 0;
+      scanPollingInterval = setInterval(async () => {
+        try {
+          const statusResp = await fetch('../api/discovery/status');
+          if (statusResp.ok) {
+            const status = await statusResp.json();
+            if (status.isScanning) {
+              statusText.textContent = 'Scanning: ' + status.camerasAnalyzed + ' cameras analyzed...';
+              // Check for new suggestions during scan
+              if (status.pendingSuggestions > camerasDone) {
+                camerasDone = status.pendingSuggestions;
+                await loadDiscoverySuggestions();
+              }
+            }
+          }
+        } catch (e) { /* ignore polling errors */ }
+      }, 1000);
 
       try {
         const response = await fetch('../api/discovery/scan', { method: 'POST' });
@@ -687,6 +709,11 @@ export const EDITOR_HTML = `<!DOCTYPE html>
         console.error('Discovery scan failed:', e);
         setStatus('Discovery scan failed', 'error');
       } finally {
+        // Stop polling
+        if (scanPollingInterval) {
+          clearInterval(scanPollingInterval);
+          scanPollingInterval = null;
+        }
         scanBtn.disabled = false;
         scanBtn.textContent = 'Scan Now';
       }
