@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# IDE
+.idea/
+*.swp
+*.swo
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment
+.env
+.env.local
+
+# Development files
+.git/
+.github/
+.claude/
+
+# Note: dist/ and out/ are NOT excluded - they contain the built plugin
