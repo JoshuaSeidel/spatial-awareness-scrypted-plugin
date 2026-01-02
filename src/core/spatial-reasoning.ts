@@ -462,19 +462,33 @@ export class SpatialReasoningEngine {
       timeContext = ` after ${dwellTime}s`;
     }
 
-    // Summarize journey if they visited multiple cameras
+    // Summarize journey if they visited multiple cameras (use landmarks from topology)
     let journeyContext = '';
-    if (tracked.journey.length > 0) {
-      const cameraNames = [tracked.entryCameraName || 'entrance'];
-      for (const segment of tracked.journey) {
-        if (segment.toCameraName && !cameraNames.includes(segment.toCameraName)) {
-          cameraNames.push(segment.toCameraName);
+    if (tracked.journey.length > 0 && this.topology) {
+      const visitedLandmarks: string[] = [];
+
+      // Get landmarks from entry camera
+      if (tracked.entryCamera) {
+        const entryLandmarks = getLandmarksVisibleFromCamera(this.topology, tracked.entryCamera);
+        const entryLandmark = entryLandmarks.find(l => l.isEntryPoint || l.type === 'access') || entryLandmarks[0];
+        if (entryLandmark) {
+          visitedLandmarks.push(entryLandmark.name);
         }
       }
-      if (cameraNames.length > 1) {
-        // Simplify camera names
-        const simplified = cameraNames.map(n => this.inferAreaFromCameraName(n) || n);
-        journeyContext = ` — visited ${simplified.join(' → ')}`;
+
+      // Get landmarks from journey segments
+      for (const segment of tracked.journey) {
+        const segmentLandmarks = getLandmarksVisibleFromCamera(this.topology, segment.toCameraId);
+        const segmentLandmark = segmentLandmarks.find(l =>
+          !visitedLandmarks.includes(l.name) && (l.type === 'access' || l.type === 'zone' || l.type === 'structure')
+        );
+        if (segmentLandmark && !visitedLandmarks.includes(segmentLandmark.name)) {
+          visitedLandmarks.push(segmentLandmark.name);
+        }
+      }
+
+      if (visitedLandmarks.length > 1) {
+        journeyContext = ` — visited ${visitedLandmarks.join(' → ')}`;
       }
     }
 
@@ -644,29 +658,8 @@ export class SpatialReasoningEngine {
       return `the ${desc}`;
     }
 
-    // Priority 6: Infer from camera name (e.g., "Front Door Camera" -> "front door area")
-    const cameraArea = this.inferAreaFromCameraName(camera.name);
-    if (cameraArea) {
-      return `the ${cameraArea}`;
-    }
-
-    // Fallback: Just use camera name
-    return direction === 'from' ? `${camera.name} area` : `towards ${camera.name}`;
-  }
-
-  /** Infer area name from camera name */
-  private inferAreaFromCameraName(cameraName: string): string | null {
-    const name = cameraName.toLowerCase();
-    // Remove common camera suffixes
-    const cleaned = name
-      .replace(/\s*(camera|cam|nvr|ipc|poe)\s*/gi, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    if (cleaned.length > 0 && cleaned !== cameraName.toLowerCase()) {
-      return cleaned;
-    }
-    return null;
+    // Fallback: Generic description (no camera name inference - use topology for context)
+    return direction === 'from' ? 'property' : 'property';
   }
 
   /** Get appropriate movement verb based on context */

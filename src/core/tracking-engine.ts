@@ -555,14 +555,14 @@ export class TrackingEngine {
         });
       } else {
         // Non-entry point - still alert about activity using movement alert type
-        // This notifies about any activity around the property
+        // This notifies about any activity around the property using topology context
         await this.alertManager.checkAndAlert('movement', tracked, {
           cameraId: sighting.cameraId,
           cameraName: sighting.cameraName,
           toCameraId: sighting.cameraId,
           toCameraName: sighting.cameraName,
           objectClass: sighting.detection.className,
-          objectLabel: `${this.capitalize(tracked.className)} detected at ${this.inferAreaFromCameraName(sighting.cameraName) || sighting.cameraName}`,
+          objectLabel: spatialResult.description, // Use spatial reasoning description (topology-based)
           detectionId: sighting.detectionId,
           involvedLandmarks: spatialResult.involvedLandmarks?.map(l => l.name),
           usedLlm: spatialResult.usedLlm,
@@ -571,21 +571,6 @@ export class TrackingEngine {
 
       this.recordAlertTime(globalId);
     }, this.config.loiteringThreshold);
-  }
-
-  /** Capitalize first letter */
-  private capitalize(s: string): string {
-    return s ? s.charAt(0).toUpperCase() + s.slice(1) : '';
-  }
-
-  /** Infer area name from camera name */
-  private inferAreaFromCameraName(cameraName: string): string | null {
-    const name = cameraName.toLowerCase();
-    const cleaned = name
-      .replace(/\s*(camera|cam|nvr|ipc|poe)\s*/gi, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-    return cleaned.length > 0 && cleaned !== name ? cleaned : null;
   }
 
   /** Attempt to correlate a sighting with existing tracked objects */

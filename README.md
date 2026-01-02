@@ -63,6 +63,68 @@ Done! Your camera topology is configured.
 - **MQTT** - Home Assistant integration
 - **REST API** - Query tracked objects programmatically
 
+## Topology Configuration
+
+The plugin uses topology data (landmarks, zones, connections) to generate meaningful alerts. Camera names are **not** used for location descriptions - only topology landmarks matter.
+
+### Setting Up Landmarks
+
+For best alert quality, configure landmarks in the topology editor:
+
+1. **Entry/Exit Points** - Mark where people enter/exit your property
+   - Examples: `Driveway`, `Front Gate`, `Side Gate`, `Street`
+   - Set `isEntryPoint: true` or `isExitPoint: true`
+
+2. **Access Points** - Paths and walkways
+   - Examples: `Front Walkway`, `Back Path`, `Garage Door`
+   - Type: `access`
+
+3. **Zones** - Areas of your property
+   - Examples: `Front Yard`, `Back Yard`, `Side Yard`, `Patio`
+   - Type: `zone`
+
+4. **Structures** - Buildings and fixed features
+   - Examples: `Garage`, `Shed`, `Front Porch`, `Deck`
+   - Type: `structure`
+
+5. **Features** - Other notable landmarks
+   - Examples: `Mailbox`, `Pool`, `Garden`, `Trash Cans`
+   - Type: `feature`
+
+### Linking Landmarks to Cameras
+
+Each camera should have `visibleLandmarks` configured - the landmarks visible in that camera's view:
+
+```json
+{
+  "cameras": [{
+    "deviceId": "abc123",
+    "name": "Front Camera",
+    "context": {
+      "visibleLandmarks": ["front-door", "driveway", "mailbox"]
+    }
+  }]
+}
+```
+
+### Example Topology
+
+```json
+{
+  "landmarks": [
+    { "id": "driveway", "name": "Driveway", "type": "access", "isEntryPoint": true },
+    { "id": "front-door", "name": "Front Door", "type": "access" },
+    { "id": "backyard", "name": "Back Yard", "type": "zone" },
+    { "id": "garage", "name": "Garage", "type": "structure" }
+  ]
+}
+```
+
+With proper landmarks, alerts become rich and contextual:
+- "Person arrived at the Driveway from Main Street"
+- "Person moved from the Front Porch heading towards the Back Yard"
+- "Person left the Garage towards Driveway after 2m on property - visited Driveway > Front Door > Garage"
+
 ## Configuration
 
 ### Settings
