@@ -30,7 +30,7 @@ import {
   Landmark,
   findCamera,
 } from '../models/topology';
-import { mediaObjectToBase64, buildImageContent, ImageData, LlmProvider, isVisionNotSupportedError } from './spatial-reasoning';
+import { mediaObjectToBase64, buildImageContent, ImageData, LlmProvider, isVisionFormatError } from './spatial-reasoning';
 
 const { systemManager } = sdk;
 
@@ -253,17 +253,23 @@ export class TopologyDiscoveryEngine {
       return analysis;
     }
 
-    // Try with detected provider format first, then fallback to alternate format
-    const formatsToTry: LlmProvider[] = [this.llmProviderType];
+    // Try with detected provider format first, then fallback to alternates
+    // The order matters: try the most likely formats first
+    const formatsToTry: LlmProvider[] = [];
 
-    // Add fallback format
+    // Start with detected format
+    formatsToTry.push(this.llmProviderType);
+
+    // Add fallbacks based on detected provider
     if (this.llmProviderType === 'openai') {
-      formatsToTry.push('anthropic');
+      formatsToTry.push('scrypted', 'anthropic');
     } else if (this.llmProviderType === 'anthropic') {
-      formatsToTry.push('openai');
+      formatsToTry.push('scrypted', 'openai');
+    } else if (this.llmProviderType === 'scrypted') {
+      formatsToTry.push('anthropic', 'openai');
     } else {
-      // Unknown - try both
-      formatsToTry.push('openai');
+      // Unknown - try all formats
+      formatsToTry.push('scrypted', 'anthropic', 'openai');
     }
 
     let lastError: any = null;
@@ -353,8 +359,8 @@ export class TopologyDiscoveryEngine {
         lastError = e;
 
         // Check if this is a vision/multimodal format error
-        if (isVisionNotSupportedError(e)) {
-          this.console.warn(`[Discovery] ${formatType} format not supported, trying fallback...`);
+        if (isVisionFormatError(e)) {
+          this.console.warn(`[Discovery] ${formatType} format failed, trying fallback...`);
           continue; // Try next format
         }
 
@@ -367,8 +373,8 @@ export class TopologyDiscoveryEngine {
     // All formats failed
     if (lastError) {
       const errorStr = String(lastError);
-      if (isVisionNotSupportedError(lastError)) {
-        analysis.error = 'Vision/image analysis not supported by configured LLM. Ensure you have a vision-capable model (e.g., gpt-4o, gpt-4-turbo, claude-3-sonnet) configured.';
+      if (isVisionFormatError(lastError)) {
+        analysis.error = 'Vision/image analysis failed with all formats. Ensure you have a vision-capable model (e.g., gpt-4o, gpt-4-turbo, claude-3-sonnet) configured and the @scrypted/llm plugin supports vision.';
       } else {
         analysis.error = `Analysis failed: ${errorStr}`;
       }
