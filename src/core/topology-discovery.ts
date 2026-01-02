@@ -30,7 +30,7 @@ import {
   Landmark,
   findCamera,
 } from '../models/topology';
-import { mediaObjectToBase64, buildImageContent, ImageData } from './spatial-reasoning';
+import { mediaObjectToBase64, buildImageContent, ImageData, LlmProvider } from './spatial-reasoning';
 
 const { systemManager } = sdk;
 
@@ -100,6 +100,7 @@ export class TopologyDiscoveryEngine {
   private topology: CameraTopology | null = null;
   private llmDevice: ChatCompletionDevice | null = null;
   private llmSearched: boolean = false;
+  private llmProviderType: LlmProvider = 'unknown';
 
   // Scene analysis cache (camera ID -> analysis)
   private sceneCache: Map<string, SceneAnalysis> = new Map();
@@ -177,8 +178,24 @@ export class TopologyDiscoveryEngine {
         if (!device) continue;
 
         if (device.interfaces?.includes('ChatCompletion')) {
+          const deviceName = device.name?.toLowerCase() || '';
+
+          // Detect provider type for image format selection
+          if (deviceName.includes('openai') || deviceName.includes('gpt')) {
+            this.llmProviderType = 'openai';
+          } else if (deviceName.includes('anthropic') || deviceName.includes('claude')) {
+            this.llmProviderType = 'anthropic';
+          } else if (deviceName.includes('ollama') || deviceName.includes('gemini') ||
+                     deviceName.includes('google') || deviceName.includes('llama')) {
+            // These providers use OpenAI-compatible format
+            this.llmProviderType = 'openai';
+          } else {
+            this.llmProviderType = 'unknown';
+          }
+
           this.llmDevice = device as unknown as ChatCompletionDevice;
           this.console.log(`[Discovery] Connected to LLM: ${device.name}`);
+          this.console.log(`[Discovery] Image format: ${this.llmProviderType}`);
           return this.llmDevice;
         }
       }
@@ -237,14 +254,14 @@ export class TopologyDiscoveryEngine {
     }
 
     try {
-      // Build multimodal message with Anthropic-native format
+      // Build multimodal message with provider-specific image format
       const result = await llm.getChatCompletion({
         messages: [
           {
             role: 'user',
             content: [
               { type: 'text', text: SCENE_ANALYSIS_PROMPT },
-              buildImageContent(imageData),
+              buildImageContent(imageData, this.llmProviderType),
             ],
           },
         ],

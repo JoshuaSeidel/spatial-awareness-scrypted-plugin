@@ -100,21 +100,44 @@ export async function mediaObjectToBase64(mediaObject: MediaObject): Promise<Ima
   }
 }
 
+/** LLM Provider type for image format selection */
+export type LlmProvider = 'openai' | 'anthropic' | 'unknown';
+
 /**
  * Build image content block for ChatCompletion API
- * Compatible with both OpenAI and Anthropic formats via @scrypted/llm
+ * Supports both OpenAI and Anthropic formats
+ * @param imageData - Image data with base64 and media type
+ * @param provider - The LLM provider type (openai, anthropic, or unknown)
  */
-export function buildImageContent(imageData: ImageData): any {
-  // Use Anthropic's native format which @scrypted/llm should translate
-  // This format is more explicit about the base64 data
-  return {
-    type: 'image',
-    source: {
-      type: 'base64',
-      media_type: imageData.mediaType,
-      data: imageData.base64,
-    },
-  };
+export function buildImageContent(imageData: ImageData, provider: LlmProvider = 'unknown'): any {
+  if (provider === 'openai') {
+    // OpenAI format: uses data URL with image_url wrapper
+    return {
+      type: 'image_url',
+      image_url: {
+        url: `data:${imageData.mediaType};base64,${imageData.base64}`,
+      },
+    };
+  } else if (provider === 'anthropic') {
+    // Anthropic format: uses separate base64 data and media_type
+    return {
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: imageData.mediaType,
+        data: imageData.base64,
+      },
+    };
+  } else {
+    // Unknown provider: try OpenAI format as it's more commonly supported
+    // Most LLM wrappers (including @scrypted/llm) understand the OpenAI format
+    return {
+      type: 'image_url',
+      image_url: {
+        url: `data:${imageData.mediaType};base64,${imageData.base64}`,
+      },
+    };
+  }
 }
 
 export class SpatialReasoningEngine {
@@ -361,6 +384,7 @@ export class SpatialReasoningEngine {
 
   private llmSearched: boolean = false;
   private llmProvider: string | null = null;
+  private llmProviderType: LlmProvider = 'unknown';
 
   /** Find or initialize LLM device - looks for ChatCompletion interface from @scrypted/llm plugin */
   private async findLlmDevice(): Promise<ChatCompletionDevice | null> {
@@ -381,27 +405,36 @@ export class SpatialReasoningEngine {
           const deviceName = device.name?.toLowerCase() || '';
           const pluginId = (device as any).pluginId?.toLowerCase() || '';
 
-          // Identify the provider type for logging
+          // Identify the provider type for logging and image format selection
           let providerType = 'Unknown';
-          if (pluginId.includes('@scrypted/llm') || pluginId.includes('llm')) {
-            providerType = 'Scrypted LLM';
-          }
+          let providerTypeEnum: LlmProvider = 'unknown';
+
           if (deviceName.includes('openai') || deviceName.includes('gpt')) {
             providerType = 'OpenAI';
+            providerTypeEnum = 'openai';
           } else if (deviceName.includes('anthropic') || deviceName.includes('claude')) {
             providerType = 'Anthropic';
+            providerTypeEnum = 'anthropic';
           } else if (deviceName.includes('ollama')) {
             providerType = 'Ollama';
+            providerTypeEnum = 'openai'; // Ollama uses OpenAI-compatible format
           } else if (deviceName.includes('gemini') || deviceName.includes('google')) {
             providerType = 'Google';
+            providerTypeEnum = 'openai'; // Google uses OpenAI-compatible format
           } else if (deviceName.includes('llama')) {
             providerType = 'llama.cpp';
+            providerTypeEnum = 'openai'; // llama.cpp uses OpenAI-compatible format
+          } else if (pluginId.includes('@scrypted/llm') || pluginId.includes('llm')) {
+            providerType = 'Scrypted LLM';
+            providerTypeEnum = 'unknown';
           }
 
           this.llmDevice = device as unknown as ChatCompletionDevice;
           this.llmProvider = `${providerType} (${device.name})`;
+          this.llmProviderType = providerTypeEnum;
           this.console.log(`[LLM] Connected to ${providerType}: ${device.name}`);
           this.console.log(`[LLM] Plugin: ${pluginId || 'N/A'}`);
+          this.console.log(`[LLM] Image format: ${providerTypeEnum}`);
           this.console.log(`[LLM] Interfaces: ${device.interfaces?.join(', ')}`);
           return this.llmDevice;
         }
@@ -421,6 +454,11 @@ export class SpatialReasoningEngine {
   /** Get the current LLM provider name */
   getLlmProvider(): string | null {
     return this.llmProvider;
+  }
+
+  /** Get the current LLM provider type for image format selection */
+  getLlmProviderType(): LlmProvider {
+    return this.llmProviderType;
   }
 
   /** Check if LLM is available */
@@ -801,10 +839,10 @@ export class SpatialReasoningEngine {
       // Build message content - use multimodal format if we have an image
       let messageContent: any;
       if (imageData) {
-        // Vision-capable multimodal message format (Anthropic native format)
+        // Vision-capable multimodal message format (provider-specific)
         messageContent = [
           { type: 'text', text: prompt },
-          buildImageContent(imageData),
+          buildImageContent(imageData, this.llmProviderType),
         ];
       } else {
         // Fallback to text-only if image conversion failed
@@ -906,10 +944,10 @@ If no clear landmark is identifiable, respond with: {"name": null}`;
       // Build message content - use multimodal format if we have an image
       let messageContent: any;
       if (imageData) {
-        // Vision-capable multimodal message format (Anthropic native format)
+        // Vision-capable multimodal message format (provider-specific)
         messageContent = [
           { type: 'text', text: prompt },
-          buildImageContent(imageData),
+          buildImageContent(imageData, this.llmProviderType),
         ];
       } else {
         // Fallback to text-only if image conversion failed
