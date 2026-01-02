@@ -84,22 +84,33 @@ export interface ImageData {
  */
 export async function mediaObjectToBase64(mediaObject: MediaObject): Promise<ImageData | null> {
   try {
+    console.log(`[Image] Converting MediaObject, mimeType=${mediaObject?.mimeType}`);
+
     // Convert MediaObject to Buffer using mediaManager
     const buffer = await mediaManager.convertMediaObjectToBuffer(mediaObject, ScryptedMimeTypes.Image);
 
-    if (!buffer || buffer.length === 0) {
-      console.warn('Failed to convert MediaObject: empty buffer');
+    if (!buffer) {
+      console.warn('[Image] convertMediaObjectToBuffer returned null/undefined');
+      return null;
+    }
+
+    console.log(`[Image] Buffer received: ${buffer.length} bytes`);
+
+    if (buffer.length === 0) {
+      console.warn('[Image] Buffer is empty (0 bytes)');
+      return null;
+    }
+
+    // Check if buffer is too small to be a valid image (< 1KB is suspicious)
+    if (buffer.length < 1000) {
+      // Log what the buffer contains - might be an error message
+      const bufferContent = buffer.toString('utf8').substring(0, 100);
+      console.warn(`[Image] Buffer too small (${buffer.length} bytes), content: ${bufferContent}`);
       return null;
     }
 
     // Convert buffer to base64 (raw, no data URL prefix)
     const base64 = buffer.toString('base64');
-
-    // Validate base64 - check it's not empty and looks valid
-    if (!base64 || base64.length < 100) {
-      console.warn(`Invalid base64: length=${base64?.length || 0}`);
-      return null;
-    }
 
     // Determine MIME type - default to JPEG for camera images
     const mediaType = mediaObject.mimeType?.split(';')[0] || 'image/jpeg';
@@ -108,7 +119,7 @@ export async function mediaObjectToBase64(mediaObject: MediaObject): Promise<Ima
 
     return { base64, mediaType };
   } catch (e) {
-    console.warn('Failed to convert MediaObject to base64:', e);
+    console.warn('[Image] Failed to convert MediaObject to base64:', e);
     return null;
   }
 }

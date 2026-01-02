@@ -213,11 +213,27 @@ export class TopologyDiscoveryEngine {
     try {
       const camera = systemManager.getDeviceById<Camera>(cameraId);
       if (!camera?.interfaces?.includes(ScryptedInterface.Camera)) {
+        this.console.warn(`[Discovery] Camera ${cameraId} doesn't have Camera interface`);
         return null;
       }
 
+      this.console.log(`[Discovery] Taking snapshot from camera: ${camera.name || cameraId}`);
       const mediaObject = await camera.takePicture();
-      return mediaObjectToBase64(mediaObject);
+
+      if (!mediaObject) {
+        this.console.warn(`[Discovery] takePicture() returned null for ${camera.name}`);
+        return null;
+      }
+
+      this.console.log(`[Discovery] MediaObject received: mimeType=${mediaObject.mimeType}`);
+
+      const imageData = await mediaObjectToBase64(mediaObject);
+
+      if (!imageData) {
+        this.console.warn(`[Discovery] Failed to convert MediaObject to base64 for ${camera.name}`);
+      }
+
+      return imageData;
     } catch (e) {
       this.console.warn(`[Discovery] Failed to get snapshot from camera ${cameraId}:`, e);
       return null;
