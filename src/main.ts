@@ -1827,9 +1827,24 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       // Calculate position for the landmark WITHIN the camera's field of view
       let position = suggestion.landmark.position;
       if (!position || (position.x === 0 && position.y === 0)) {
-        // Find a camera that can see this landmark
-        const visibleCameraId = suggestion.landmark.visibleFromCameras?.[0];
-        const camera = visibleCameraId ? topology.cameras.find(c => c.deviceId === visibleCameraId) : null;
+        // Debug logging
+        this.console.log(`[Discovery] Processing landmark "${suggestion.landmark.name}"`);
+        this.console.log(`[Discovery] visibleFromCameras: ${JSON.stringify(suggestion.landmark.visibleFromCameras)}`);
+        this.console.log(`[Discovery] Available cameras: ${topology.cameras.map(c => `${c.name}(${c.deviceId})`).join(', ')}`);
+
+        // Find a camera that can see this landmark - use flexible matching (deviceId, name, or case-insensitive)
+        const visibleCameraRef = suggestion.landmark.visibleFromCameras?.[0];
+        const camera = visibleCameraRef ? topology.cameras.find(c =>
+          c.deviceId === visibleCameraRef ||
+          c.name === visibleCameraRef ||
+          c.name.toLowerCase() === visibleCameraRef.toLowerCase()
+        ) : null;
+
+        if (camera) {
+          this.console.log(`[Discovery] Matched camera: ${camera.name}, position: ${JSON.stringify(camera.floorPlanPosition)}, fov: ${JSON.stringify(camera.fov)}`);
+        } else {
+          this.console.warn(`[Discovery] No camera matched for "${visibleCameraRef}"`);
+        }
 
         if (camera?.floorPlanPosition) {
           // Get camera's FOV direction and range (cast to any for flexible access)
@@ -1839,8 +1854,10 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
           const fovAngle = fov.angle || 90;
 
           // Count existing landmarks from this camera to spread them out
+          const cameraDeviceId = camera.deviceId;
           const existingFromCamera = (topology.landmarks || []).filter(l =>
-            l.visibleFromCameras?.includes(visibleCameraId)
+            l.visibleFromCameras?.includes(cameraDeviceId) ||
+            l.visibleFromCameras?.includes(camera.name)
           ).length;
 
           // Calculate position in front of camera within its FOV
