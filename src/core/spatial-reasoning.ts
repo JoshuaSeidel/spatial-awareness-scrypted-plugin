@@ -69,27 +69,52 @@ interface ChatCompletionDevice extends ScryptedDevice {
   streamChatCompletion?(params: any): AsyncGenerator<any>;
 }
 
+/** Image data for LLM vision APIs */
+export interface ImageData {
+  /** Raw base64 encoded image data (no data URL prefix) */
+  base64: string;
+  /** MIME type (e.g., 'image/jpeg') */
+  mediaType: string;
+}
+
 /**
- * Convert a MediaObject to a base64 data URL for vision LLM consumption
+ * Convert a MediaObject to base64 image data for vision LLM consumption
  * @param mediaObject - MediaObject from camera.takePicture()
- * @returns Base64 data URL (data:image/jpeg;base64,...) or null if conversion fails
+ * @returns ImageData with raw base64 and media type, or null if conversion fails
  */
-export async function mediaObjectToBase64(mediaObject: MediaObject): Promise<string | null> {
+export async function mediaObjectToBase64(mediaObject: MediaObject): Promise<ImageData | null> {
   try {
     // Convert MediaObject to Buffer using mediaManager
     const buffer = await mediaManager.convertMediaObjectToBuffer(mediaObject, ScryptedMimeTypes.Image);
 
-    // Convert buffer to base64
+    // Convert buffer to base64 (raw, no data URL prefix)
     const base64 = buffer.toString('base64');
 
     // Determine MIME type - default to JPEG for camera images
-    const mimeType = mediaObject.mimeType?.split(';')[0] || 'image/jpeg';
+    const mediaType = mediaObject.mimeType?.split(';')[0] || 'image/jpeg';
 
-    return `data:${mimeType};base64,${base64}`;
+    return { base64, mediaType };
   } catch (e) {
     console.warn('Failed to convert MediaObject to base64:', e);
     return null;
   }
+}
+
+/**
+ * Build image content block for ChatCompletion API
+ * Compatible with both OpenAI and Anthropic formats via @scrypted/llm
+ */
+export function buildImageContent(imageData: ImageData): any {
+  // Use Anthropic's native format which @scrypted/llm should translate
+  // This format is more explicit about the base64 data
+  return {
+    type: 'image',
+    source: {
+      type: 'base64',
+      media_type: imageData.mediaType,
+      data: imageData.base64,
+    },
+  };
 }
 
 export class SpatialReasoningEngine {
@@ -751,7 +776,7 @@ export class SpatialReasoningEngine {
 
     try {
       // Convert image to base64 for vision LLM
-      const imageBase64 = await mediaObjectToBase64(mediaObject);
+      const imageData = await mediaObjectToBase64(mediaObject);
 
       // Retrieve relevant context for RAG
       const relevantChunks = this.retrieveRelevantContext(
@@ -775,11 +800,11 @@ export class SpatialReasoningEngine {
 
       // Build message content - use multimodal format if we have an image
       let messageContent: any;
-      if (imageBase64) {
-        // Vision-capable multimodal message format (OpenAI compatible)
+      if (imageData) {
+        // Vision-capable multimodal message format (Anthropic native format)
         messageContent = [
           { type: 'text', text: prompt },
-          { type: 'image_url', image_url: { url: imageBase64 } },
+          buildImageContent(imageData),
         ];
       } else {
         // Fallback to text-only if image conversion failed
@@ -863,7 +888,7 @@ Generate ONLY the description, nothing else:`;
 
     try {
       // Convert image to base64 for vision LLM
-      const imageBase64 = await mediaObjectToBase64(mediaObject);
+      const imageData = await mediaObjectToBase64(mediaObject);
 
       const prompt = `Analyze this security camera image. A ${objectClass} was detected.
 
@@ -880,11 +905,11 @@ If no clear landmark is identifiable, respond with: {"name": null}`;
 
       // Build message content - use multimodal format if we have an image
       let messageContent: any;
-      if (imageBase64) {
-        // Vision-capable multimodal message format (OpenAI compatible)
+      if (imageData) {
+        // Vision-capable multimodal message format (Anthropic native format)
         messageContent = [
           { type: 'text', text: prompt },
-          { type: 'image_url', image_url: { url: imageBase64 } },
+          buildImageContent(imageData),
         ];
       } else {
         // Fallback to text-only if image conversion failed

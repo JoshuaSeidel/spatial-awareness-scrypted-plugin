@@ -30,7 +30,7 @@ import {
   Landmark,
   findCamera,
 } from '../models/topology';
-import { mediaObjectToBase64 } from './spatial-reasoning';
+import { mediaObjectToBase64, buildImageContent, ImageData } from './spatial-reasoning';
 
 const { systemManager } = sdk;
 
@@ -191,8 +191,8 @@ export class TopologyDiscoveryEngine {
     return null;
   }
 
-  /** Get camera snapshot as base64 */
-  private async getCameraSnapshot(cameraId: string): Promise<string | null> {
+  /** Get camera snapshot as ImageData */
+  private async getCameraSnapshot(cameraId: string): Promise<ImageData | null> {
     try {
       const camera = systemManager.getDeviceById<Camera>(cameraId);
       if (!camera?.interfaces?.includes(ScryptedInterface.Camera)) {
@@ -230,21 +230,21 @@ export class TopologyDiscoveryEngine {
       return analysis;
     }
 
-    const imageBase64 = await this.getCameraSnapshot(cameraId);
-    if (!imageBase64) {
+    const imageData = await this.getCameraSnapshot(cameraId);
+    if (!imageData) {
       analysis.error = 'Failed to capture camera snapshot';
       return analysis;
     }
 
     try {
-      // Build multimodal message
+      // Build multimodal message with Anthropic-native format
       const result = await llm.getChatCompletion({
         messages: [
           {
             role: 'user',
             content: [
               { type: 'text', text: SCENE_ANALYSIS_PROMPT },
-              { type: 'image_url', image_url: { url: imageBase64 } },
+              buildImageContent(imageData),
             ],
           },
         ],
@@ -387,6 +387,14 @@ export class TopologyDiscoveryEngine {
       this.status.camerasAnalyzed = analyses.length;
       this.console.log(`[Discovery] Analyzed ${analyses.length} cameras successfully`);
 
+      // Handle case where no cameras were successfully analyzed
+      if (analyses.length === 0) {
+        this.console.warn('[Discovery] No cameras were successfully analyzed');
+        this.status.lastError = 'No cameras were successfully analyzed - check LLM configuration';
+        this.status.lastScanTime = Date.now();
+        return null;
+      }
+
       // Correlate if we have multiple cameras
       let correlation: TopologyCorrelation | null = null;
       if (analyses.length >= 2) {
@@ -394,7 +402,7 @@ export class TopologyDiscoveryEngine {
         if (correlation) {
           this.generateSuggestionsFromCorrelation(correlation);
         }
-      } else {
+      } else if (analyses.length === 1) {
         // Single camera - generate suggestions from its analysis
         this.generateSuggestionsFromAnalysis(analyses[0]);
       }
