@@ -112,10 +112,12 @@ export type LlmProvider = 'openai' | 'anthropic' | 'unknown';
 export function buildImageContent(imageData: ImageData, provider: LlmProvider = 'unknown'): any {
   if (provider === 'openai') {
     // OpenAI format: uses data URL with image_url wrapper
+    // Include detail parameter for compatibility
     return {
       type: 'image_url',
       image_url: {
         url: `data:${imageData.mediaType};base64,${imageData.base64}`,
+        detail: 'auto',
       },
     };
   } else if (provider === 'anthropic') {
@@ -129,15 +131,29 @@ export function buildImageContent(imageData: ImageData, provider: LlmProvider = 
       },
     };
   } else {
-    // Unknown provider: try OpenAI format as it's more commonly supported
-    // Most LLM wrappers (including @scrypted/llm) understand the OpenAI format
+    // Unknown provider: try Anthropic format first as it's more explicit
+    // Some plugins may translate this to OpenAI format internally
     return {
-      type: 'image_url',
-      image_url: {
-        url: `data:${imageData.mediaType};base64,${imageData.base64}`,
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: imageData.mediaType,
+        data: imageData.base64,
       },
     };
   }
+}
+
+/** Check if an error indicates vision/multimodal content is not supported */
+export function isVisionNotSupportedError(error: any): boolean {
+  const errorStr = String(error);
+  return (
+    errorStr.includes('content.str') ||
+    errorStr.includes('should be a valid string') ||
+    errorStr.includes('Invalid content type') ||
+    errorStr.includes('does not support vision') ||
+    errorStr.includes('image_url') && errorStr.includes('not supported')
+  );
 }
 
 export class SpatialReasoningEngine {

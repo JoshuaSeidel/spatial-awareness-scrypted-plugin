@@ -30,7 +30,7 @@ import {
   Landmark,
   findCamera,
 } from '../models/topology';
-import { mediaObjectToBase64, buildImageContent, ImageData, LlmProvider } from './spatial-reasoning';
+import { mediaObjectToBase64, buildImageContent, ImageData, LlmProvider, isVisionNotSupportedError } from './spatial-reasoning';
 
 const { systemManager } = sdk;
 
@@ -253,77 +253,125 @@ export class TopologyDiscoveryEngine {
       return analysis;
     }
 
-    try {
-      // Build multimodal message with provider-specific image format
-      const result = await llm.getChatCompletion({
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: SCENE_ANALYSIS_PROMPT },
-              buildImageContent(imageData, this.llmProviderType),
-            ],
-          },
-        ],
-        max_tokens: 500,
-        temperature: 0.3,
-      });
+    // Try with detected provider format first, then fallback to alternate format
+    const formatsToTry: LlmProvider[] = [this.llmProviderType];
 
-      const content = result?.choices?.[0]?.message?.content;
-      if (content && typeof content === 'string') {
-        try {
-          // Extract JSON from response (handle markdown code blocks)
-          let jsonStr = content.trim();
-          if (jsonStr.startsWith('```')) {
-            jsonStr = jsonStr.replace(/```json?\n?/g, '').replace(/```$/g, '').trim();
+    // Add fallback format
+    if (this.llmProviderType === 'openai') {
+      formatsToTry.push('anthropic');
+    } else if (this.llmProviderType === 'anthropic') {
+      formatsToTry.push('openai');
+    } else {
+      // Unknown - try both
+      formatsToTry.push('openai');
+    }
+
+    let lastError: any = null;
+
+    for (const formatType of formatsToTry) {
+      try {
+        this.console.log(`[Discovery] Trying ${formatType} image format for ${cameraName}...`);
+
+        // Build multimodal message with provider-specific image format
+        const result = await llm.getChatCompletion({
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: SCENE_ANALYSIS_PROMPT },
+                buildImageContent(imageData, formatType),
+              ],
+            },
+          ],
+          max_tokens: 500,
+          temperature: 0.3,
+        });
+
+        const content = result?.choices?.[0]?.message?.content;
+        if (content && typeof content === 'string') {
+          try {
+            // Extract JSON from response (handle markdown code blocks)
+            let jsonStr = content.trim();
+            if (jsonStr.startsWith('```')) {
+              jsonStr = jsonStr.replace(/```json?\n?/g, '').replace(/```$/g, '').trim();
+            }
+
+            const parsed = JSON.parse(jsonStr);
+
+            // Map parsed data to our types
+            if (Array.isArray(parsed.landmarks)) {
+              analysis.landmarks = parsed.landmarks.map((l: any) => ({
+                name: l.name || 'Unknown',
+                type: this.mapLandmarkType(l.type),
+                confidence: typeof l.confidence === 'number' ? l.confidence : 0.7,
+                description: l.description || '',
+                boundingBox: l.boundingBox,
+              }));
+            }
+
+            if (Array.isArray(parsed.zones)) {
+              analysis.zones = parsed.zones.map((z: any) => ({
+                name: z.name || 'Unknown',
+                type: this.mapZoneType(z.type),
+                coverage: typeof z.coverage === 'number' ? z.coverage : 0.5,
+                description: z.description || '',
+                boundingBox: z.boundingBox,
+              }));
+            }
+
+            if (parsed.edges && typeof parsed.edges === 'object') {
+              analysis.edges = {
+                top: parsed.edges.top || '',
+                left: parsed.edges.left || '',
+                right: parsed.edges.right || '',
+                bottom: parsed.edges.bottom || '',
+              };
+            }
+
+            if (parsed.orientation) {
+              analysis.orientation = this.mapOrientation(parsed.orientation);
+            }
+
+            analysis.isValid = true;
+            this.console.log(`[Discovery] Analyzed ${cameraName}: ${analysis.landmarks.length} landmarks, ${analysis.zones.length} zones (using ${formatType} format)`);
+
+            // Update the preferred format for future requests
+            if (formatType !== this.llmProviderType) {
+              this.console.log(`[Discovery] Switching to ${formatType} format for future requests`);
+              this.llmProviderType = formatType;
+            }
+
+            // Success - exit the retry loop
+            return analysis;
+          } catch (parseError) {
+            this.console.warn(`[Discovery] Failed to parse LLM response for ${cameraName}:`, parseError);
+            analysis.error = 'Failed to parse LLM response';
+            return analysis;
           }
-
-          const parsed = JSON.parse(jsonStr);
-
-          // Map parsed data to our types
-          if (Array.isArray(parsed.landmarks)) {
-            analysis.landmarks = parsed.landmarks.map((l: any) => ({
-              name: l.name || 'Unknown',
-              type: this.mapLandmarkType(l.type),
-              confidence: typeof l.confidence === 'number' ? l.confidence : 0.7,
-              description: l.description || '',
-              boundingBox: l.boundingBox,
-            }));
-          }
-
-          if (Array.isArray(parsed.zones)) {
-            analysis.zones = parsed.zones.map((z: any) => ({
-              name: z.name || 'Unknown',
-              type: this.mapZoneType(z.type),
-              coverage: typeof z.coverage === 'number' ? z.coverage : 0.5,
-              description: z.description || '',
-              boundingBox: z.boundingBox,
-            }));
-          }
-
-          if (parsed.edges && typeof parsed.edges === 'object') {
-            analysis.edges = {
-              top: parsed.edges.top || '',
-              left: parsed.edges.left || '',
-              right: parsed.edges.right || '',
-              bottom: parsed.edges.bottom || '',
-            };
-          }
-
-          if (parsed.orientation) {
-            analysis.orientation = this.mapOrientation(parsed.orientation);
-          }
-
-          analysis.isValid = true;
-          this.console.log(`[Discovery] Analyzed ${cameraName}: ${analysis.landmarks.length} landmarks, ${analysis.zones.length} zones`);
-        } catch (parseError) {
-          this.console.warn(`[Discovery] Failed to parse LLM response for ${cameraName}:`, parseError);
-          analysis.error = 'Failed to parse LLM response';
         }
+      } catch (e) {
+        lastError = e;
+
+        // Check if this is a vision/multimodal format error
+        if (isVisionNotSupportedError(e)) {
+          this.console.warn(`[Discovery] ${formatType} format not supported, trying fallback...`);
+          continue; // Try next format
+        }
+
+        // Not a format error - don't retry
+        this.console.warn(`[Discovery] Scene analysis failed for ${cameraName}:`, e);
+        break;
       }
-    } catch (e) {
-      this.console.warn(`[Discovery] Scene analysis failed for ${cameraName}:`, e);
-      analysis.error = `Analysis failed: ${e}`;
+    }
+
+    // All formats failed
+    if (lastError) {
+      const errorStr = String(lastError);
+      if (isVisionNotSupportedError(lastError)) {
+        analysis.error = 'Vision/image analysis not supported by configured LLM. Ensure you have a vision-capable model (e.g., gpt-4o, gpt-4-turbo, claude-3-sonnet) configured.';
+      } else {
+        analysis.error = `Analysis failed: ${errorStr}`;
+      }
     }
 
     // Cache the analysis
