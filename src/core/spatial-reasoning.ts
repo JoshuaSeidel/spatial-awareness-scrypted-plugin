@@ -327,6 +327,130 @@ export class SpatialReasoningEngine {
     return null;
   }
 
+  /** Generate entry description when object enters property */
+  generateEntryDescription(
+    tracked: TrackedObject,
+    cameraId: string
+  ): SpatialReasoningResult {
+    if (!this.topology) {
+      return {
+        description: `${this.capitalizeFirst(tracked.className)} entered property`,
+        involvedLandmarks: [],
+        confidence: 0.5,
+        usedLlm: false,
+      };
+    }
+
+    const camera = findCamera(this.topology, cameraId);
+    if (!camera) {
+      return {
+        description: `${this.capitalizeFirst(tracked.className)} entered property`,
+        involvedLandmarks: [],
+        confidence: 0.5,
+        usedLlm: false,
+      };
+    }
+
+    const landmarks = getLandmarksVisibleFromCamera(this.topology, cameraId);
+    const objectType = this.capitalizeFirst(tracked.className);
+
+    // Build entry description using topology context
+    const location = this.describeLocation(camera, landmarks, 'to');
+
+    // Check if we can determine where they came from (e.g., street, neighbor)
+    const entryLandmark = landmarks.find(l => l.isEntryPoint);
+    const streetLandmark = landmarks.find(l => l.type === 'street');
+    const neighborLandmark = landmarks.find(l => l.type === 'neighbor');
+
+    let source = '';
+    if (streetLandmark) {
+      source = ` from ${streetLandmark.name}`;
+    } else if (neighborLandmark) {
+      source = ` from ${neighborLandmark.name}`;
+    }
+
+    return {
+      description: `${objectType} arrived at ${location}${source}`,
+      involvedLandmarks: landmarks,
+      confidence: 0.8,
+      usedLlm: false,
+    };
+  }
+
+  /** Generate exit description when object leaves property */
+  generateExitDescription(
+    tracked: TrackedObject,
+    cameraId: string
+  ): SpatialReasoningResult {
+    if (!this.topology) {
+      return {
+        description: `${this.capitalizeFirst(tracked.className)} left property`,
+        involvedLandmarks: [],
+        confidence: 0.5,
+        usedLlm: false,
+      };
+    }
+
+    const camera = findCamera(this.topology, cameraId);
+    if (!camera) {
+      return {
+        description: `${this.capitalizeFirst(tracked.className)} left property`,
+        involvedLandmarks: [],
+        confidence: 0.5,
+        usedLlm: false,
+      };
+    }
+
+    const landmarks = getLandmarksVisibleFromCamera(this.topology, cameraId);
+    const objectType = this.capitalizeFirst(tracked.className);
+
+    // Build exit description
+    const location = this.describeLocation(camera, landmarks, 'from');
+
+    // Check for exit point landmarks
+    const exitLandmark = landmarks.find(l => l.isExitPoint);
+    const streetLandmark = landmarks.find(l => l.type === 'street');
+
+    let destination = '';
+    if (streetLandmark) {
+      destination = ` towards ${streetLandmark.name}`;
+    } else if (exitLandmark) {
+      destination = ` via ${exitLandmark.name}`;
+    }
+
+    // Include time on property if available
+    const dwellTime = Math.round((tracked.lastSeen - tracked.firstSeen) / 1000);
+    let timeContext = '';
+    if (dwellTime > 60) {
+      timeContext = ` after ${Math.round(dwellTime / 60)}m on property`;
+    } else if (dwellTime > 10) {
+      timeContext = ` after ${dwellTime}s`;
+    }
+
+    // Summarize journey if they visited multiple cameras
+    let journeyContext = '';
+    if (tracked.journey.length > 0) {
+      const cameraNames = [tracked.entryCameraName || 'entrance'];
+      for (const segment of tracked.journey) {
+        if (segment.toCameraName && !cameraNames.includes(segment.toCameraName)) {
+          cameraNames.push(segment.toCameraName);
+        }
+      }
+      if (cameraNames.length > 1) {
+        // Simplify camera names
+        const simplified = cameraNames.map(n => this.inferAreaFromCameraName(n) || n);
+        journeyContext = ` — visited ${simplified.join(' → ')}`;
+      }
+    }
+
+    return {
+      description: `${objectType} left ${location}${destination}${timeContext}${journeyContext}`,
+      involvedLandmarks: landmarks,
+      confidence: 0.8,
+      usedLlm: false,
+    };
+  }
+
   /** Generate rich movement description using LLM */
   async generateMovementDescription(
     tracked: TrackedObject,
@@ -415,28 +539,113 @@ export class SpatialReasoningEngine {
     const objectType = this.capitalizeFirst(tracked.className);
     const transitSecs = Math.round(transitTime / 1000);
 
-    // Build origin description
-    let origin = fromCamera.name;
-    if (fromLandmarks.length > 0) {
-      const nearLandmark = fromLandmarks[0];
-      origin = `near ${nearLandmark.name}`;
-    } else if (fromCamera.context?.coverageDescription) {
-      origin = fromCamera.context.coverageDescription.split('.')[0];
-    }
+    // Get connection for path context
+    const connection = this.topology ? findConnection(this.topology, fromCamera.deviceId, toCamera.deviceId) : null;
+
+    // Build origin description using landmarks, camera context, or camera name
+    let origin = this.describeLocation(fromCamera, fromLandmarks, 'from');
 
     // Build destination description
-    let destination = toCamera.name;
-    if (toLandmarks.length > 0) {
-      const nearLandmark = toLandmarks[0];
-      destination = `towards ${nearLandmark.name}`;
-    } else if (toCamera.context?.coverageDescription) {
-      destination = `towards ${toCamera.context.coverageDescription.split('.')[0]}`;
+    let destination = this.describeLocation(toCamera, toLandmarks, 'to');
+
+    // Check if we have a named path/connection
+    let pathContext = '';
+    if (connection?.name) {
+      pathContext = ` via ${connection.name}`;
+    } else if (connection?.pathLandmarks?.length && this.topology) {
+      const pathNames = connection.pathLandmarks
+        .map(id => findLandmark(this.topology!, id)?.name)
+        .filter(Boolean);
+      if (pathNames.length > 0) {
+        pathContext = ` past ${pathNames.join(' and ')}`;
+      }
     }
 
-    // Build transit string
-    const transitStr = transitSecs > 0 ? ` (${transitSecs}s)` : '';
+    // Include journey context if this is not the first camera
+    let journeyContext = '';
+    if (tracked.journey.length > 0) {
+      const totalTime = Math.round((Date.now() - tracked.firstSeen) / 1000);
+      if (totalTime > 60) {
+        journeyContext = ` (${Math.round(totalTime / 60)}m on property)`;
+      }
+    }
 
-    return `${objectType} moving from ${origin} ${destination}${transitStr}`;
+    // Determine movement verb based on transit time and object type
+    const verb = this.getMovementVerb(tracked.className, transitSecs);
+
+    return `${objectType} ${verb} ${origin} heading ${destination}${pathContext}${journeyContext}`;
+  }
+
+  /** Describe a location using landmarks, camera context, or camera name */
+  private describeLocation(camera: CameraNode, landmarks: Landmark[], direction: 'from' | 'to'): string {
+    // Priority 1: Use entry/exit landmarks
+    const entryExitLandmark = landmarks.find(l =>
+      (direction === 'from' && l.isExitPoint) || (direction === 'to' && l.isEntryPoint)
+    );
+    if (entryExitLandmark) {
+      return direction === 'from' ? `the ${entryExitLandmark.name}` : `the ${entryExitLandmark.name}`;
+    }
+
+    // Priority 2: Use access landmarks (driveway, walkway, etc.)
+    const accessLandmark = landmarks.find(l => l.type === 'access');
+    if (accessLandmark) {
+      return `the ${accessLandmark.name}`;
+    }
+
+    // Priority 3: Use zone landmarks (front yard, back yard)
+    const zoneLandmark = landmarks.find(l => l.type === 'zone');
+    if (zoneLandmark) {
+      return `the ${zoneLandmark.name}`;
+    }
+
+    // Priority 4: Use any landmark
+    if (landmarks.length > 0) {
+      return `near ${landmarks[0].name}`;
+    }
+
+    // Priority 5: Use camera coverage description
+    if (camera.context?.coverageDescription) {
+      const desc = camera.context.coverageDescription.split('.')[0].toLowerCase();
+      return `the ${desc}`;
+    }
+
+    // Priority 6: Infer from camera name (e.g., "Front Door Camera" -> "front door area")
+    const cameraArea = this.inferAreaFromCameraName(camera.name);
+    if (cameraArea) {
+      return `the ${cameraArea}`;
+    }
+
+    // Fallback: Just use camera name
+    return direction === 'from' ? `${camera.name} area` : `towards ${camera.name}`;
+  }
+
+  /** Infer area name from camera name */
+  private inferAreaFromCameraName(cameraName: string): string | null {
+    const name = cameraName.toLowerCase();
+    // Remove common camera suffixes
+    const cleaned = name
+      .replace(/\s*(camera|cam|nvr|ipc|poe)\s*/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (cleaned.length > 0 && cleaned !== cameraName.toLowerCase()) {
+      return cleaned;
+    }
+    return null;
+  }
+
+  /** Get appropriate movement verb based on context */
+  private getMovementVerb(className: string, transitSecs: number): string {
+    if (className === 'car' || className === 'vehicle' || className === 'truck') {
+      return transitSecs < 10 ? 'driving from' : 'moved from';
+    }
+    if (transitSecs < 5) {
+      return 'walking from';
+    }
+    if (transitSecs < 30) {
+      return 'moved from';
+    }
+    return 'traveled from';
   }
 
   /** Build path description from connection */

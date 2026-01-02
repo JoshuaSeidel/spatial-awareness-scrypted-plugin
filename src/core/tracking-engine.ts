@@ -519,12 +519,9 @@ export class TrackingEngine {
       // Generate entry alert if this is an entry point
       // Entry alerts also respect loitering threshold and cooldown
       if (isEntryPoint && this.passesLoiteringThreshold(tracked) && !this.isInAlertCooldown(globalId)) {
-        // Get spatial reasoning for entry event
-        const spatialResult = await this.getSpatialDescription(
+        // Get spatial reasoning for entry event using topology context
+        const spatialResult = this.spatialReasoning.generateEntryDescription(
           tracked,
-          'outside', // Virtual "outside" location for entry
-          sighting.cameraId,
-          0,
           sighting.cameraId
         );
 
@@ -532,10 +529,10 @@ export class TrackingEngine {
           cameraId: sighting.cameraId,
           cameraName: sighting.cameraName,
           objectClass: sighting.detection.className,
-          objectLabel: spatialResult?.description || sighting.detection.label,
+          objectLabel: spatialResult.description,
           detectionId: sighting.detectionId,
-          involvedLandmarks: spatialResult?.involvedLandmarks?.map(l => l.name),
-          usedLlm: spatialResult?.usedLlm,
+          involvedLandmarks: spatialResult.involvedLandmarks?.map(l => l.name),
+          usedLlm: spatialResult.usedLlm,
         });
 
         this.recordAlertTime(globalId);
@@ -596,15 +593,23 @@ export class TrackingEngine {
       if (current && current.state === 'pending') {
         this.state.markExited(tracked.globalId, sighting.cameraId, sighting.cameraName);
 
+        // Generate rich exit description using topology context
+        const spatialResult = this.spatialReasoning.generateExitDescription(
+          current,
+          sighting.cameraId
+        );
+
         this.console.log(
-          `Object ${tracked.globalId.slice(0, 8)} exited via ${sighting.cameraName}`
+          `Object ${tracked.globalId.slice(0, 8)} exited: ${spatialResult.description}`
         );
 
         await this.alertManager.checkAndAlert('property_exit', current, {
           cameraId: sighting.cameraId,
           cameraName: sighting.cameraName,
           objectClass: current.className,
-          objectLabel: current.label,
+          objectLabel: spatialResult.description,
+          involvedLandmarks: spatialResult.involvedLandmarks?.map(l => l.name),
+          usedLlm: spatialResult.usedLlm,
         });
       }
       this.pendingTimers.delete(tracked.globalId);
