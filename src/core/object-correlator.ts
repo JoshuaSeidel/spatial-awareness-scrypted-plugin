@@ -46,7 +46,24 @@ export class ObjectCorrelator {
       }
     }
 
-    if (candidates.length === 0) return null;
+    if (candidates.length === 0) {
+      // No candidates above threshold - try to find best match with relaxed criteria
+      // This helps when there's only one object of this class active
+      const sameClassObjects = activeObjects.filter(
+        o => o.className === sighting.detection.className
+      );
+
+      if (sameClassObjects.length === 1) {
+        // Only one object of this class - likely the same one
+        const candidate = await this.evaluateCandidate(sameClassObjects[0], sighting);
+        // Accept with lower threshold if timing is reasonable
+        if (candidate.confidence >= 0.3 && candidate.factors.timing > 0) {
+          return candidate;
+        }
+      }
+
+      return null;
+    }
 
     // Sort by confidence (highest first)
     candidates.sort((a, b) => b.confidence - a.confidence);
@@ -125,6 +142,9 @@ export class ObjectCorrelator {
       return 1.0;
     }
 
+    // Calculate transit time first
+    const transitTime = sighting.timestamp - lastSighting.timestamp;
+
     // Find connection between cameras
     const connection = findConnection(
       this.topology,
@@ -133,12 +153,25 @@ export class ObjectCorrelator {
     );
 
     if (!connection) {
-      // No defined connection - low score but not zero
-      // (allows for uncharted paths)
-      return 0.2;
+      // No defined connection - still allow correlation based on reasonable timing
+      // Allow up to 5 minutes transit between any cameras (property could be large)
+      const MAX_UNCHARTED_TRANSIT = 300000; // 5 minutes
+      if (transitTime > 0 && transitTime < MAX_UNCHARTED_TRANSIT) {
+        // Score based on how reasonable the timing is
+        // Give higher base score for reasonable transits (encourages matching)
+        if (transitTime < 60000) {
+          // Under 1 minute - very likely same object
+          return 0.9;
+        } else if (transitTime < 120000) {
+          // Under 2 minutes - probably same object
+          return 0.7;
+        } else {
+          // 2-5 minutes - possible but less certain
+          return Math.max(0.4, 0.7 - (transitTime - 120000) / 180000 * 0.3);
+        }
+      }
+      return 0.3; // Even long transits get some credit
     }
-
-    const transitTime = sighting.timestamp - lastSighting.timestamp;
     const { min, typical, max } = connection.transitTime;
 
     // Way outside range
@@ -217,7 +250,8 @@ export class ObjectCorrelator {
     );
 
     if (!connection) {
-      return 0.3; // No connection defined
+      // No connection defined - give neutral score (don't penalize)
+      return 0.5;
     }
 
     let score = 0;

@@ -214,9 +214,17 @@ export function generateAlertMessage(
 
   switch (type) {
     case 'property_entry':
-      return `${objectDesc} entered property via ${details.cameraName || 'unknown camera'}`;
+      // Use landmark context if available, otherwise describe entry location
+      if (details.involvedLandmarks && details.involvedLandmarks.length > 0) {
+        return `${objectDesc} entered property near ${details.involvedLandmarks[0]}`;
+      }
+      return `${objectDesc} entered property at ${details.cameraName || 'entrance'}`;
     case 'property_exit':
-      return `${objectDesc} exited property via ${details.cameraName || 'unknown camera'}`;
+      // Describe where they exited to, not the camera name
+      if (details.involvedLandmarks && details.involvedLandmarks.length > 0) {
+        return `${objectDesc} left property via ${details.involvedLandmarks[0]}`;
+      }
+      return `${objectDesc} left property`;
     case 'movement':
       // If we have a rich description from LLM/RAG, use it
       if (details.objectLabel && details.usedLlm) {

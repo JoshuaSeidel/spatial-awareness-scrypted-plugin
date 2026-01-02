@@ -159,25 +159,32 @@ export class AlertManager {
     const prefix = alert.severity === 'critical' ? '🚨 ' :
                    alert.severity === 'warning' ? '⚠️ ' : '';
 
+    // Use object class in title
+    const objectType = alert.details.objectClass
+      ? alert.details.objectClass.charAt(0).toUpperCase() + alert.details.objectClass.slice(1)
+      : 'Object';
+
     switch (alert.type) {
       case 'property_entry':
-        return `${prefix}🚶 Entry Detected`;
+        return `${prefix}${objectType} Arrived`;
       case 'property_exit':
-        return `${prefix}🚶 Exit Detected`;
+        return `${prefix}${objectType} Left`;
       case 'movement':
-        return `${prefix}🚶 Movement Detected`;
+        // Include destination in title
+        const dest = alert.details.toCameraName || 'area';
+        return `${prefix}${objectType} → ${dest}`;
       case 'unusual_path':
-        return `${prefix}Unusual Path`;
+        return `${prefix}Unusual Route`;
       case 'dwell_time':
-        return `${prefix}⏱️ Extended Presence`;
+        return `${prefix}${objectType} Lingering`;
       case 'restricted_zone':
-        return `${prefix}Restricted Zone Alert`;
+        return `${prefix}Restricted Zone!`;
       case 'lost_tracking':
-        return `${prefix}Lost Tracking`;
+        return `${prefix}${objectType} Lost`;
       case 'reappearance':
-        return `${prefix}Object Reappeared`;
+        return `${prefix}${objectType} Reappeared`;
       default:
-        return `${prefix}Spatial Awareness Alert`;
+        return `${prefix}Spatial Alert`;
     }
   }
 

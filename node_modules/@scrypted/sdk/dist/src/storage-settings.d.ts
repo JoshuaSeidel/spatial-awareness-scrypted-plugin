@@ -1,0 +1,52 @@
+import { ScryptedDeviceType, ScryptedInterface, Setting, Settings, SettingValue } from ".";
+export interface StorageSetting extends Omit<Setting, 'deviceFilter'> {
+    deviceFilter?: string | ((test: {
+        id: string;
+        deviceInterface: string;
+        interfaces: string[];
+        type: ScryptedDeviceType;
+        ScryptedDeviceType: typeof ScryptedDeviceType;
+        ScryptedInterface: typeof ScryptedInterface;
+    }) => boolean);
+    defaultValue?: any;
+    persistedDefaultValue?: any;
+    onPut?: (oldValue: any, newValue: any) => void;
+    onGet?: () => Promise<StorageSetting>;
+    mapPut?: (oldValue: any, newValue: any) => any;
+    mapGet?: (value: any) => any;
+    json?: boolean;
+    hide?: boolean;
+    noStore?: boolean;
+}
+export type StorageSettingsDict<T extends string> = {
+    [key in T]: StorageSetting;
+};
+export interface StorageSettingsDevice {
+    storage: Storage;
+    onDeviceEvent(eventInterface: string, eventData: any): Promise<void>;
+}
+export declare class StorageSettings<T extends string> implements Settings {
+    device: StorageSettingsDevice;
+    settings: StorageSettingsDict<T>;
+    values: {
+        [key in T]: any;
+    };
+    hasValue: {
+        [key in T]: boolean;
+    };
+    options?: {
+        hide?: {
+            [key in T]?: () => Promise<boolean>;
+        };
+        onGet?: () => Promise<Partial<StorageSettingsDict<T>>>;
+    };
+    constructor(device: StorageSettingsDevice, settings: StorageSettingsDict<T>);
+    get keys(): {
+        [key in T]: string;
+    };
+    getSettings(): Promise<Setting[]>;
+    putSetting(key: string, value: SettingValue): Promise<void>;
+    putSettingInternal(setting: StorageSetting, oldValue: any, key: string, value: SettingValue): void;
+    getItemInternal(key: T, setting: StorageSetting, rawDevice?: boolean): any;
+    getItem(key: T): any;
+}

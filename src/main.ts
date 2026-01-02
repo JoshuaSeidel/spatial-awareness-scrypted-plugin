@@ -78,8 +78,8 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
     correlationThreshold: {
       title: 'Correlation Confidence Threshold',
       type: 'number',
-      defaultValue: 0.6,
-      description: 'Minimum confidence (0-1) for automatic object correlation',
+      defaultValue: 0.35,
+      description: 'Minimum confidence (0-1) for automatic object correlation. Lower values allow more matches.',
       group: 'Tracking',
     },
     lostTimeout: {
@@ -324,7 +324,7 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
 
     const config: TrackingEngineConfig = {
       correlationWindow: (this.storageSettings.values.correlationWindow as number || 30) * 1000,
-      correlationThreshold: this.storageSettings.values.correlationThreshold as number || 0.6,
+      correlationThreshold: this.storageSettings.values.correlationThreshold as number || 0.35,
       lostTimeout: (this.storageSettings.values.lostTimeout as number || 300) * 1000,
       useVisualMatching: this.storageSettings.values.useVisualMatching as boolean ?? true,
       loiteringThreshold: (this.storageSettings.values.loiteringThreshold as number || 3) * 1000,
