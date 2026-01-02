@@ -84,14 +84,41 @@ export interface ImageData {
  */
 export async function mediaObjectToBase64(mediaObject: MediaObject): Promise<ImageData | null> {
   try {
-    console.log(`[Image] Converting MediaObject, mimeType=${mediaObject?.mimeType}`);
+    const mimeType = mediaObject?.mimeType || 'image/jpeg';
+    console.log(`[Image] Converting MediaObject, mimeType=${mimeType}`);
 
-    // First convert to JPEG to ensure consistent format
-    const jpegMediaObject = await mediaManager.convertMediaObject(mediaObject, 'image/jpeg') as MediaObject;
-    console.log(`[Image] Converted to JPEG MediaObject`);
+    // Use createMediaObject to ensure we have a proper MediaObject with mimeType
+    // Then convert to buffer - this should handle the conversion internally
+    let buffer: Buffer;
 
-    // Get the buffer from the converted media object
-    const buffer = await mediaManager.convertMediaObjectToBuffer(jpegMediaObject, 'image/jpeg');
+    try {
+      // Try direct conversion with the source mime type
+      buffer = await mediaManager.convertMediaObjectToBuffer(mediaObject, mimeType);
+    } catch (convErr) {
+      console.warn(`[Image] Direct conversion failed, trying with explicit JPEG:`, convErr);
+
+      // Try creating a new MediaObject with explicit mimeType
+      try {
+        // Get raw data if available
+        const anyMedia = mediaObject as any;
+        if (typeof anyMedia.getData === 'function') {
+          const rawData = await anyMedia.getData();
+          if (rawData && Buffer.isBuffer(rawData) && rawData.length > 1000) {
+            console.log(`[Image] Got raw data: ${rawData.length} bytes`);
+            buffer = rawData;
+          } else {
+            console.warn(`[Image] getData returned invalid data`);
+            return null;
+          }
+        } else {
+          console.warn('[Image] No getData method available');
+          return null;
+        }
+      } catch (dataErr) {
+        console.warn('[Image] Alternate data fetch failed:', dataErr);
+        return null;
+      }
+    }
 
     // Check if we got an actual Buffer (not a proxy)
     const isRealBuffer = Buffer.isBuffer(buffer);
@@ -101,24 +128,6 @@ export async function mediaObjectToBase64(mediaObject: MediaObject): Promise<Ima
 
     if (!isRealBuffer || bufferLength === 0) {
       console.warn('[Image] Did not receive a valid Buffer');
-
-      // Try alternate approach: get raw data using any type
-      try {
-        const anyMedia = mediaObject as any;
-        if (typeof anyMedia.getData === 'function') {
-          const data = await anyMedia.getData();
-          if (data && Buffer.isBuffer(data)) {
-            console.log(`[Image] Got data from getData(): ${data.length} bytes`);
-            if (data.length > 1000) {
-              const base64 = data.toString('base64');
-              return { base64, mediaType: 'image/jpeg' };
-            }
-          }
-        }
-      } catch (dataErr) {
-        console.warn('[Image] getData() failed:', dataErr);
-      }
-
       return null;
     }
 
