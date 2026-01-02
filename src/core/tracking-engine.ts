@@ -516,15 +516,34 @@ export class TrackingEngine {
         `(ID: ${globalId.slice(0, 8)})`
       );
 
-      // Generate entry alert if this is an entry point
-      // Entry alerts also respect loitering threshold and cooldown
-      if (isEntryPoint && this.passesLoiteringThreshold(tracked) && !this.isInAlertCooldown(globalId)) {
-        // Get spatial reasoning for entry event using topology context
-        const spatialResult = this.spatialReasoning.generateEntryDescription(
-          tracked,
-          sighting.cameraId
-        );
+      // Schedule loitering check - alert after object passes loitering threshold
+      // This ensures we don't miss alerts for brief appearances while still filtering noise
+      this.scheduleLoiteringAlert(globalId, sighting, isEntryPoint);
+    }
+  }
 
+  /** Schedule an alert after loitering threshold passes */
+  private scheduleLoiteringAlert(
+    globalId: GlobalTrackingId,
+    sighting: ObjectSighting,
+    isEntryPoint: boolean
+  ): void {
+    // Check after loitering threshold if object is still being tracked
+    setTimeout(async () => {
+      const tracked = this.state.getObject(globalId);
+      if (!tracked || tracked.state !== 'active') return;
+
+      // Check if we've already alerted for this object
+      if (this.isInAlertCooldown(globalId)) return;
+
+      // Generate spatial description
+      const spatialResult = this.spatialReasoning.generateEntryDescription(
+        tracked,
+        sighting.cameraId
+      );
+
+      if (isEntryPoint) {
+        // Entry point - generate property entry alert
         await this.alertManager.checkAndAlert('property_entry', tracked, {
           cameraId: sighting.cameraId,
           cameraName: sighting.cameraName,
@@ -534,10 +553,39 @@ export class TrackingEngine {
           involvedLandmarks: spatialResult.involvedLandmarks?.map(l => l.name),
           usedLlm: spatialResult.usedLlm,
         });
-
-        this.recordAlertTime(globalId);
+      } else {
+        // Non-entry point - still alert about activity using movement alert type
+        // This notifies about any activity around the property
+        await this.alertManager.checkAndAlert('movement', tracked, {
+          cameraId: sighting.cameraId,
+          cameraName: sighting.cameraName,
+          toCameraId: sighting.cameraId,
+          toCameraName: sighting.cameraName,
+          objectClass: sighting.detection.className,
+          objectLabel: `${this.capitalize(tracked.className)} detected at ${this.inferAreaFromCameraName(sighting.cameraName) || sighting.cameraName}`,
+          detectionId: sighting.detectionId,
+          involvedLandmarks: spatialResult.involvedLandmarks?.map(l => l.name),
+          usedLlm: spatialResult.usedLlm,
+        });
       }
-    }
+
+      this.recordAlertTime(globalId);
+    }, this.config.loiteringThreshold);
+  }
+
+  /** Capitalize first letter */
+  private capitalize(s: string): string {
+    return s ? s.charAt(0).toUpperCase() + s.slice(1) : '';
+  }
+
+  /** Infer area name from camera name */
+  private inferAreaFromCameraName(cameraName: string): string | null {
+    const name = cameraName.toLowerCase();
+    const cleaned = name
+      .replace(/\s*(camera|cam|nvr|ipc|poe)\s*/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return cleaned.length > 0 && cleaned !== name ? cleaned : null;
   }
 
   /** Attempt to correlate a sighting with existing tracked objects */

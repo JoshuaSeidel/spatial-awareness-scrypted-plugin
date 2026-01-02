@@ -234,22 +234,33 @@ export function generateAlertMessage(
       }
       return `${objectDesc} left property`;
     case 'movement':
-      // If we have a rich description from LLM/RAG, use it
-      if (details.objectLabel && details.usedLlm) {
+      // If objectLabel contains a full description, use it directly
+      if (details.objectLabel && details.objectLabel !== details.objectClass) {
+        // Check if this is a cross-camera movement or initial detection
+        if (details.fromCameraId && details.fromCameraId !== details.toCameraId && details.transitTime) {
+          const transitSecs = Math.round(details.transitTime / 1000);
+          const transitStr = transitSecs > 0 ? ` (${transitSecs}s)` : '';
+          const pathContext = details.pathDescription ? ` via ${details.pathDescription}` : '';
+          return `${details.objectLabel}${pathContext}${transitStr}`;
+        }
+        // Initial detection - use the label directly
+        return details.objectLabel;
+      }
+      // Cross-camera movement with basic info
+      if (details.fromCameraId && details.fromCameraId !== details.toCameraId) {
         const transitSecs = details.transitTime ? Math.round(details.transitTime / 1000) : 0;
-        const transitStr = transitSecs > 0 ? ` (${transitSecs}s)` : '';
-        // Include path/landmark context if available
-        const pathContext = details.pathDescription ? ` via ${details.pathDescription}` : '';
-        return `${details.objectLabel}${pathContext}${transitStr}`;
+        const transitStr = transitSecs > 0 ? ` (${transitSecs}s transit)` : '';
+        let movementDesc = `${objectDesc} moving from ${details.fromCameraName || 'unknown'} towards ${details.toCameraName || 'unknown'}`;
+        if (details.involvedLandmarks && details.involvedLandmarks.length > 0) {
+          movementDesc += ` near ${details.involvedLandmarks.join(', ')}`;
+        }
+        return `${movementDesc}${transitStr}`;
       }
-      // Fallback to basic message with landmark info
-      const transitSecs = details.transitTime ? Math.round(details.transitTime / 1000) : 0;
-      const transitStr = transitSecs > 0 ? ` (${transitSecs}s transit)` : '';
-      let movementDesc = `${objectDesc} moving from ${details.fromCameraName || 'unknown'} towards ${details.toCameraName || 'unknown'}`;
+      // Initial detection without full label
       if (details.involvedLandmarks && details.involvedLandmarks.length > 0) {
-        movementDesc += ` near ${details.involvedLandmarks.join(', ')}`;
+        return `${objectDesc} detected near ${details.involvedLandmarks[0]}`;
       }
-      return `${movementDesc}${transitStr}`;
+      return `${objectDesc} detected at ${details.cameraName || 'camera'}`;
     case 'unusual_path':
       return `${objectDesc} took unusual path: ${details.actualPath || 'unknown'}`;
     case 'dwell_time':

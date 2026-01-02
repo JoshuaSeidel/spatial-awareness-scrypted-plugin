@@ -303,28 +303,63 @@ export class SpatialReasoningEngine {
     return relevant;
   }
 
-  /** Find or initialize LLM device */
+  private llmSearched: boolean = false;
+  private llmProvider: string | null = null;
+
+  /** Find or initialize LLM device - specifically looks for @scrypted/llm plugin */
   private async findLlmDevice(): Promise<ObjectDetection | null> {
     if (this.llmDevice) return this.llmDevice;
+    if (this.llmSearched) return null; // Already searched and found nothing
+
+    this.llmSearched = true;
 
     try {
+      // First, look specifically for @scrypted/llm plugin
       for (const id of Object.keys(systemManager.getSystemState())) {
         const device = systemManager.getDeviceById(id);
-        if (device?.interfaces?.includes(ScryptedInterface.ObjectDetection)) {
-          const name = device.name?.toLowerCase() || '';
-          if (name.includes('llm') || name.includes('gpt') || name.includes('claude') ||
-              name.includes('ollama') || name.includes('gemini')) {
+        if (!device) continue;
+
+        // Check if this is the Scrypted LLM plugin
+        const pluginId = (device as any).pluginId?.toLowerCase() || '';
+        const providedName = (device as any).providedName?.toLowerCase() || '';
+        const deviceName = device.name?.toLowerCase() || '';
+
+        if (pluginId.includes('@scrypted/llm') ||
+            providedName.includes('llm') ||
+            (device.interfaces?.includes(ScryptedInterface.ObjectDetection) &&
+             (deviceName.includes('llm') || deviceName.includes('gpt') ||
+              deviceName.includes('claude') || deviceName.includes('ollama') ||
+              deviceName.includes('gemini') || deviceName.includes('openai')))) {
+
+          if (device.interfaces?.includes(ScryptedInterface.ObjectDetection)) {
             this.llmDevice = device as unknown as ObjectDetection;
-            this.console.log(`Found LLM device: ${device.name}`);
+            this.llmProvider = device.name || 'Unknown LLM';
+            this.console.log(`[LLM] Connected to LLM plugin: ${this.llmProvider}`);
+            this.console.log(`[LLM] Plugin ID: ${pluginId || 'N/A'}`);
             return this.llmDevice;
           }
         }
       }
+
+      // If we get here, no LLM plugin found
+      this.console.warn('[LLM] No LLM plugin found. Install @scrypted/llm for enhanced descriptions.');
+      this.console.warn('[LLM] Falling back to rule-based descriptions using topology data.');
+
     } catch (e) {
-      this.console.warn('Error finding LLM device:', e);
+      this.console.error('[LLM] Error searching for LLM device:', e);
     }
 
     return null;
+  }
+
+  /** Get the current LLM provider name */
+  getLlmProvider(): string | null {
+    return this.llmProvider;
+  }
+
+  /** Check if LLM is available */
+  isLlmAvailable(): boolean {
+    return this.llmDevice !== null;
   }
 
   /** Generate entry description when object enters property */
