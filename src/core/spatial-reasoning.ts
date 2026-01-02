@@ -9,6 +9,7 @@ import sdk, {
   ObjectDetection,
   Camera,
   MediaObject,
+  ScryptedDevice,
 } from '@scrypted/sdk';
 import {
   CameraTopology,
@@ -61,11 +62,17 @@ interface ContextChunk {
   metadata: Record<string, any>;
 }
 
+/** Interface for ChatCompletion devices (from @scrypted/llm plugin) */
+interface ChatCompletionDevice extends ScryptedDevice {
+  getChatCompletion?(params: any): Promise<any>;
+  streamChatCompletion?(params: any): AsyncGenerator<any>;
+}
+
 export class SpatialReasoningEngine {
   private config: SpatialReasoningConfig;
   private console: Console;
   private topology: CameraTopology | null = null;
-  private llmDevice: ObjectDetection | null = null;
+  private llmDevice: ChatCompletionDevice | null = null;
   private contextChunks: ContextChunk[] = [];
   private topologyContextCache: string | null = null;
   private contextCacheTime: number = 0;
@@ -306,43 +313,53 @@ export class SpatialReasoningEngine {
   private llmSearched: boolean = false;
   private llmProvider: string | null = null;
 
-  /** Find or initialize LLM device - specifically looks for @scrypted/llm plugin */
-  private async findLlmDevice(): Promise<ObjectDetection | null> {
+  /** Find or initialize LLM device - looks for ChatCompletion interface from @scrypted/llm plugin */
+  private async findLlmDevice(): Promise<ChatCompletionDevice | null> {
     if (this.llmDevice) return this.llmDevice;
     if (this.llmSearched) return null; // Already searched and found nothing
 
     this.llmSearched = true;
 
     try {
-      // First, look specifically for @scrypted/llm plugin
+      // Look for devices with ChatCompletion interface (the correct interface for @scrypted/llm)
       for (const id of Object.keys(systemManager.getSystemState())) {
         const device = systemManager.getDeviceById(id);
         if (!device) continue;
 
-        // Check if this is the Scrypted LLM plugin
-        const pluginId = (device as any).pluginId?.toLowerCase() || '';
-        const providedName = (device as any).providedName?.toLowerCase() || '';
-        const deviceName = device.name?.toLowerCase() || '';
+        // Check if this device has ChatCompletion interface
+        // The @scrypted/llm plugin exposes ChatCompletion, not ObjectDetection
+        if (device.interfaces?.includes('ChatCompletion')) {
+          const deviceName = device.name?.toLowerCase() || '';
+          const pluginId = (device as any).pluginId?.toLowerCase() || '';
 
-        if (pluginId.includes('@scrypted/llm') ||
-            providedName.includes('llm') ||
-            (device.interfaces?.includes(ScryptedInterface.ObjectDetection) &&
-             (deviceName.includes('llm') || deviceName.includes('gpt') ||
-              deviceName.includes('claude') || deviceName.includes('ollama') ||
-              deviceName.includes('gemini') || deviceName.includes('openai')))) {
-
-          if (device.interfaces?.includes(ScryptedInterface.ObjectDetection)) {
-            this.llmDevice = device as unknown as ObjectDetection;
-            this.llmProvider = device.name || 'Unknown LLM';
-            this.console.log(`[LLM] Connected to LLM plugin: ${this.llmProvider}`);
-            this.console.log(`[LLM] Plugin ID: ${pluginId || 'N/A'}`);
-            return this.llmDevice;
+          // Identify the provider type for logging
+          let providerType = 'Unknown';
+          if (pluginId.includes('@scrypted/llm') || pluginId.includes('llm')) {
+            providerType = 'Scrypted LLM';
           }
+          if (deviceName.includes('openai') || deviceName.includes('gpt')) {
+            providerType = 'OpenAI';
+          } else if (deviceName.includes('anthropic') || deviceName.includes('claude')) {
+            providerType = 'Anthropic';
+          } else if (deviceName.includes('ollama')) {
+            providerType = 'Ollama';
+          } else if (deviceName.includes('gemini') || deviceName.includes('google')) {
+            providerType = 'Google';
+          } else if (deviceName.includes('llama')) {
+            providerType = 'llama.cpp';
+          }
+
+          this.llmDevice = device as unknown as ChatCompletionDevice;
+          this.llmProvider = `${providerType} (${device.name})`;
+          this.console.log(`[LLM] Connected to ${providerType}: ${device.name}`);
+          this.console.log(`[LLM] Plugin: ${pluginId || 'N/A'}`);
+          this.console.log(`[LLM] Interfaces: ${device.interfaces?.join(', ')}`);
+          return this.llmDevice;
         }
       }
 
       // If we get here, no LLM plugin found
-      this.console.warn('[LLM] No LLM plugin found. Install @scrypted/llm for enhanced descriptions.');
+      this.console.warn('[LLM] No ChatCompletion device found. Install @scrypted/llm for enhanced descriptions.');
       this.console.warn('[LLM] Falling back to rule-based descriptions using topology data.');
 
     } catch (e) {
@@ -695,7 +712,7 @@ export class SpatialReasoningEngine {
     return connection.name || undefined;
   }
 
-  /** Get LLM-enhanced description */
+  /** Get LLM-enhanced description using ChatCompletion interface */
   private async getLlmEnhancedDescription(
     tracked: TrackedObject,
     fromCamera: CameraNode,
@@ -706,7 +723,7 @@ export class SpatialReasoningEngine {
     mediaObject: MediaObject
   ): Promise<string | null> {
     const llm = await this.findLlmDevice();
-    if (!llm) return null;
+    if (!llm || !llm.getChatCompletion) return null;
 
     try {
       // Retrieve relevant context for RAG
@@ -729,14 +746,22 @@ export class SpatialReasoningEngine {
         ragContext
       );
 
-      // Call LLM
-      const result = await llm.detectObjects(mediaObject, {
-        settings: { prompt }
-      } as any);
+      // Call LLM using ChatCompletion interface
+      const result = await llm.getChatCompletion({
+        messages: [
+          {
+            role: 'user',
+            content: prompt,
+          },
+        ],
+        max_tokens: 150,
+        temperature: 0.7,
+      });
 
-      // Extract description from result
-      if (result.detections?.[0]?.label) {
-        return result.detections[0].label;
+      // Extract description from ChatCompletion result
+      const content = result?.choices?.[0]?.message?.content;
+      if (content && typeof content === 'string') {
+        return content.trim();
       }
 
       return null;
@@ -784,7 +809,7 @@ Examples of good descriptions:
 Generate ONLY the description, nothing else:`;
   }
 
-  /** Suggest a new landmark based on AI analysis */
+  /** Suggest a new landmark based on AI analysis using ChatCompletion */
   async suggestLandmark(
     cameraId: string,
     mediaObject: MediaObject,
@@ -794,7 +819,7 @@ Generate ONLY the description, nothing else:`;
     if (!this.config.enableLandmarkLearning) return null;
 
     const llm = await this.findLlmDevice();
-    if (!llm) return null;
+    if (!llm || !llm.getChatCompletion) return null;
 
     try {
       const prompt = `Analyze this security camera image. A ${objectClass} was detected.
@@ -810,13 +835,22 @@ If you can identify a clear landmark feature, respond with ONLY a JSON object:
 
 If no clear landmark is identifiable, respond with: {"name": null}`;
 
-      const result = await llm.detectObjects(mediaObject, {
-        settings: { prompt }
-      } as any);
+      // Call LLM using ChatCompletion interface
+      const result = await llm.getChatCompletion({
+        messages: [
+          {
+            role: 'user',
+            content: prompt,
+          },
+        ],
+        max_tokens: 100,
+        temperature: 0.3,
+      });
 
-      if (result.detections?.[0]?.label) {
+      const content = result?.choices?.[0]?.message?.content;
+      if (content && typeof content === 'string') {
         try {
-          const parsed = JSON.parse(result.detections[0].label);
+          const parsed = JSON.parse(content.trim());
           if (parsed.name && parsed.type) {
             const suggestionId = `suggest_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
