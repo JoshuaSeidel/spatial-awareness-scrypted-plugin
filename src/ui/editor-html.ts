@@ -127,7 +127,7 @@ export const EDITOR_HTML = `<!DOCTYPE html>
             <button class="btn btn-small btn-primary" id="scan-now-btn" onclick="runDiscoveryScan()">Scan Now</button>
           </div>
           <div id="discovery-status" style="font-size: 11px; color: #888; margin-bottom: 8px;">
-            <span id="discovery-status-text">Not scanned yet</span>
+            <span id="discovery-status-text">Position cameras first, then scan</span>
           </div>
           <div id="discovery-suggestions-list"></div>
         </div>
@@ -160,6 +160,7 @@ export const EDITOR_HTML = `<!DOCTYPE html>
         </div>
         <div class="toolbar-group">
           <button class="btn" onclick="clearDrawings()">Clear Drawings</button>
+          <button class="btn" onclick="clearAllTopology()" style="background: #dc2626;">Delete All</button>
         </div>
         <div class="toolbar-group">
           <button class="btn btn-primary" onclick="saveTopology()">Save</button>
@@ -662,6 +663,13 @@ export const EDITOR_HTML = `<!DOCTYPE html>
     let scanPollingInterval = null;
 
     async function runDiscoveryScan() {
+      // Check if cameras are positioned on the floor plan
+      const positionedCameras = topology.cameras.filter(c => c.floorPlanPosition);
+      if (positionedCameras.length === 0) {
+        alert('Please position at least one camera on the floor plan before running discovery.\\n\\nSteps:\\n1. Click "Place Camera" in the toolbar\\n2. Click on the floor plan where the camera is located\\n3. Select the camera from the dropdown\\n4. Drag the rotation handle to set its direction\\n5. Then run discovery to detect zones and connections');
+        return;
+      }
+
       const scanBtn = document.getElementById('scan-now-btn');
       const statusText = document.getElementById('discovery-status-text');
       scanBtn.disabled = true;
@@ -1269,6 +1277,29 @@ export const EDITOR_HTML = `<!DOCTYPE html>
     function drawCamera(camera) {
       const pos = camera.floorPlanPosition;
       const isSelected = selectedItem?.type === 'camera' && selectedItem?.id === camera.deviceId;
+
+      // Get FOV settings or defaults
+      const fov = camera.fov || { mode: 'simple', angle: 90, direction: 0, range: 80 };
+      const direction = (fov.mode === 'simple' || !fov.mode) ? (fov.direction || 0) : 0;
+      const fovAngle = (fov.mode === 'simple' || !fov.mode) ? (fov.angle || 90) : 90;
+      const range = (fov.mode === 'simple' || !fov.mode) ? (fov.range || 80) : 80;
+
+      // Convert direction to radians (0 = up/north, 90 = right/east)
+      const dirRad = (direction - 90) * Math.PI / 180;
+      const halfFov = (fovAngle / 2) * Math.PI / 180;
+
+      // Draw FOV cone
+      ctx.beginPath();
+      ctx.moveTo(pos.x, pos.y);
+      ctx.arc(pos.x, pos.y, range, dirRad - halfFov, dirRad + halfFov);
+      ctx.closePath();
+      ctx.fillStyle = isSelected ? 'rgba(233, 69, 96, 0.15)' : 'rgba(76, 175, 80, 0.15)';
+      ctx.fill();
+      ctx.strokeStyle = isSelected ? 'rgba(233, 69, 96, 0.5)' : 'rgba(76, 175, 80, 0.5)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // Draw camera circle
       ctx.beginPath();
       ctx.arc(pos.x, pos.y, 20, 0, Math.PI * 2);
       ctx.fillStyle = isSelected ? '#e94560' : '#0f3460';
@@ -1276,12 +1307,41 @@ export const EDITOR_HTML = `<!DOCTYPE html>
       ctx.strokeStyle = '#fff';
       ctx.lineWidth = 2;
       ctx.stroke();
+
+      // Draw camera icon/text
       ctx.fillStyle = '#fff';
       ctx.font = '12px sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText('CAM', pos.x, pos.y);
       ctx.fillText(camera.name, pos.x, pos.y + 35);
+
+      // Draw direction handle (when selected) for rotation
+      if (isSelected) {
+        const handleLength = 45;
+        const handleX = pos.x + Math.cos(dirRad) * handleLength;
+        const handleY = pos.y + Math.sin(dirRad) * handleLength;
+
+        // Handle line
+        ctx.beginPath();
+        ctx.moveTo(pos.x + Math.cos(dirRad) * 20, pos.y + Math.sin(dirRad) * 20);
+        ctx.lineTo(handleX, handleY);
+        ctx.strokeStyle = '#ff6b6b';
+        ctx.lineWidth = 3;
+        ctx.stroke();
+
+        // Handle grip (circle at end)
+        ctx.beginPath();
+        ctx.arc(handleX, handleY, 8, 0, Math.PI * 2);
+        ctx.fillStyle = '#ff6b6b';
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Store handle position for hit detection
+        camera._handlePos = { x: handleX, y: handleY };
+      }
     }
 
     function drawConnection(from, to, conn) {
@@ -1542,7 +1602,16 @@ export const EDITOR_HTML = `<!DOCTYPE html>
 
     function showCameraProperties(camera) {
       const panel = document.getElementById('properties-panel');
-      panel.innerHTML = '<h3>Camera Properties</h3><div class="form-group"><label>Name</label><input type="text" value="' + camera.name + '" onchange="updateCameraName(\\'' + camera.deviceId + '\\', this.value)"></div><div class="form-group"><label class="checkbox-group"><input type="checkbox" ' + (camera.isEntryPoint ? 'checked' : '') + ' onchange="updateCameraEntry(\\'' + camera.deviceId + '\\', this.checked)">Entry Point</label></div><div class="form-group"><label class="checkbox-group"><input type="checkbox" ' + (camera.isExitPoint ? 'checked' : '') + ' onchange="updateCameraExit(\\'' + camera.deviceId + '\\', this.checked)">Exit Point</label></div><div class="form-group"><button class="btn" style="width: 100%; background: #f44336;" onclick="deleteCamera(\\'' + camera.deviceId + '\\')">Delete Camera</button></div>';
+      const fov = camera.fov || { mode: 'simple', angle: 90, direction: 0, range: 80 };
+      panel.innerHTML = '<h3>Camera Properties</h3>' +
+        '<div class="form-group"><label>Name</label><input type="text" value="' + camera.name + '" onchange="updateCameraName(\\'' + camera.deviceId + '\\', this.value)"></div>' +
+        '<div class="form-group"><label class="checkbox-group"><input type="checkbox" ' + (camera.isEntryPoint ? 'checked' : '') + ' onchange="updateCameraEntry(\\'' + camera.deviceId + '\\', this.checked)">Entry Point</label></div>' +
+        '<div class="form-group"><label class="checkbox-group"><input type="checkbox" ' + (camera.isExitPoint ? 'checked' : '') + ' onchange="updateCameraExit(\\'' + camera.deviceId + '\\', this.checked)">Exit Point</label></div>' +
+        '<h4 style="margin-top: 15px; margin-bottom: 10px; color: #888;">Field of View</h4>' +
+        '<div class="form-group"><label>Direction (0=up, 90=right)</label><input type="number" value="' + Math.round(fov.direction || 0) + '" min="0" max="359" onchange="updateCameraFov(\\'' + camera.deviceId + '\\', \\'direction\\', this.value)"></div>' +
+        '<div class="form-group"><label>FOV Angle (degrees)</label><input type="number" value="' + (fov.angle || 90) + '" min="30" max="180" onchange="updateCameraFov(\\'' + camera.deviceId + '\\', \\'angle\\', this.value)"></div>' +
+        '<div class="form-group"><label>Range (pixels)</label><input type="number" value="' + (fov.range || 80) + '" min="20" max="300" onchange="updateCameraFov(\\'' + camera.deviceId + '\\', \\'range\\', this.value)"></div>' +
+        '<div class="form-group"><button class="btn" style="width: 100%; background: #f44336;" onclick="deleteCamera(\\'' + camera.deviceId + '\\')">Delete Camera</button></div>';
     }
 
     function showConnectionProperties(connection) {
@@ -1553,6 +1622,13 @@ export const EDITOR_HTML = `<!DOCTYPE html>
     function updateCameraName(id, value) { const camera = topology.cameras.find(c => c.deviceId === id); if (camera) camera.name = value; updateUI(); }
     function updateCameraEntry(id, value) { const camera = topology.cameras.find(c => c.deviceId === id); if (camera) camera.isEntryPoint = value; }
     function updateCameraExit(id, value) { const camera = topology.cameras.find(c => c.deviceId === id); if (camera) camera.isExitPoint = value; }
+    function updateCameraFov(id, field, value) {
+      const camera = topology.cameras.find(c => c.deviceId === id);
+      if (!camera) return;
+      if (!camera.fov) camera.fov = { mode: 'simple', angle: 90, direction: 0, range: 80 };
+      camera.fov[field] = parseFloat(value);
+      render();
+    }
     function updateConnectionName(id, value) { const conn = topology.connections.find(c => c.id === id); if (conn) conn.name = value; updateUI(); }
     function updateTransitTime(id, field, value) { const conn = topology.connections.find(c => c.id === id); if (conn) conn.transitTime[field] = parseInt(value) * 1000; }
     function updateConnectionBidi(id, value) { const conn = topology.connections.find(c => c.id === id); if (conn) conn.bidirectional = value; render(); }
@@ -1696,10 +1772,30 @@ export const EDITOR_HTML = `<!DOCTYPE html>
       setStatus('Drawings cleared', 'success');
     }
 
+    function clearAllTopology() {
+      if (!confirm('DELETE ALL TOPOLOGY DATA?\\n\\nThis will remove:\\n- All cameras\\n- All connections\\n- All landmarks\\n- All zones\\n- All drawings\\n\\nThis cannot be undone.')) return;
+
+      topology.cameras = [];
+      topology.connections = [];
+      topology.landmarks = [];
+      topology.globalZones = [];
+      topology.drawnZones = [];
+      topology.drawings = [];
+      topology.relationships = [];
+
+      selectedItem = null;
+      document.getElementById('properties-panel').innerHTML = '<h3>Properties</h3><p style="color: #666;">Select an item to edit.</p>';
+      updateCameraSelects();
+      updateUI();
+      render();
+      setStatus('All topology data cleared', 'warning');
+    }
+
     function closeModal(id) { document.getElementById(id).classList.remove('active'); }
     function setStatus(text, type) { document.getElementById('status-text').textContent = text; const dot = document.getElementById('status-dot'); dot.className = 'status-dot'; if (type === 'warning') dot.classList.add('warning'); if (type === 'error') dot.classList.add('error'); }
 
     let dragging = null;
+    let rotatingCamera = null;
 
     canvas.addEventListener('mousedown', (e) => {
       const rect = canvas.getBoundingClientRect();
@@ -1715,7 +1811,20 @@ export const EDITOR_HTML = `<!DOCTYPE html>
       }
 
       if (currentTool === 'select') {
-        // Check cameras first
+        // Check for rotation handle on selected camera first
+        if (selectedItem?.type === 'camera') {
+          const camera = topology.cameras.find(c => c.deviceId === selectedItem.id);
+          if (camera?._handlePos) {
+            const dist = Math.hypot(x - camera._handlePos.x, y - camera._handlePos.y);
+            if (dist < 15) {
+              rotatingCamera = camera;
+              setStatus('Drag to rotate camera direction', 'warning');
+              return;
+            }
+          }
+        }
+
+        // Check cameras
         for (const camera of topology.cameras) {
           if (camera.floorPlanPosition) {
             const dist = Math.hypot(x - camera.floorPlanPosition.x, y - camera.floorPlanPosition.y);
@@ -1779,6 +1888,20 @@ export const EDITOR_HTML = `<!DOCTYPE html>
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
 
+      // Handle camera rotation
+      if (rotatingCamera) {
+        const pos = rotatingCamera.floorPlanPosition;
+        const angle = Math.atan2(y - pos.y, x - pos.x);
+        // Convert to our direction system (0 = up/north, 90 = right/east)
+        const direction = (angle * 180 / Math.PI) + 90;
+        if (!rotatingCamera.fov) {
+          rotatingCamera.fov = { mode: 'simple', angle: 90, direction: 0, range: 80 };
+        }
+        rotatingCamera.fov.direction = ((direction % 360) + 360) % 360; // Normalize 0-360
+        render();
+        return;
+      }
+
       if (dragging) {
         if (dragging.type === 'camera') {
           dragging.item.floorPlanPosition.x = x;
@@ -1801,6 +1924,13 @@ export const EDITOR_HTML = `<!DOCTYPE html>
     });
 
     canvas.addEventListener('mouseup', (e) => {
+      // Clear camera rotation
+      if (rotatingCamera) {
+        setStatus('Camera direction updated', 'success');
+        rotatingCamera = null;
+        return;
+      }
+
       if (isDrawing && currentDrawing) {
         if (!topology.drawings) topology.drawings = [];
         // Normalize room coordinates if drawn backwards

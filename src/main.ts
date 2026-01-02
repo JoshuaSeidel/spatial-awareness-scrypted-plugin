@@ -25,6 +25,10 @@ import {
   LANDMARK_TEMPLATES,
   inferRelationships,
   DrawnZoneType,
+  GlobalZone,
+  GlobalZoneType,
+  CameraZoneMapping,
+  ClipPath,
 } from './models/topology';
 import { TrackedObject } from './models/tracked-object';
 import { Alert, AlertRule, createDefaultRules } from './models/alert';
@@ -1872,9 +1876,11 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       // Create a drawn zone from the discovery zone
       const zone = suggestion.zone;
 
-      // Find cameras that see this zone type to determine position
-      const cameraWithZone = suggestion.sourceCameras?.[0];
-      const camera = cameraWithZone ? topology.cameras.find(c => c.deviceId === cameraWithZone || c.name === cameraWithZone) : null;
+      // Find cameras that see this zone
+      const sourceCameras = suggestion.sourceCameras || [];
+      const camera = sourceCameras[0]
+        ? topology.cameras.find(c => c.deviceId === sourceCameras[0] || c.name === sourceCameras[0])
+        : null;
 
       // Create a default polygon near the camera or at a default location
       let centerX = 300;
@@ -1886,8 +1892,11 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
 
       // Create a rectangular zone (user can edit later)
       const size = 100;
+      const timestamp = Date.now();
+
+      // 1. Create DrawnZone (visual on floor plan)
       const drawnZone = {
-        id: `zone_${Date.now()}`,
+        id: `zone_${timestamp}`,
         name: zone.name,
         type: (zone.type || 'custom') as DrawnZoneType,
         description: zone.description,
@@ -1897,47 +1906,90 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
           { x: centerX + size/2, y: centerY + size/2 },
           { x: centerX - size/2, y: centerY + size/2 },
         ] as any,
+        linkedCameras: sourceCameras,
       };
 
       if (!topology.drawnZones) {
         topology.drawnZones = [];
       }
       topology.drawnZones.push(drawnZone);
-      updated = true;
 
-      this.console.log(`[Discovery] Added zone: ${zone.name} (${zone.type})`);
+      // 2. Create GlobalZone (for tracking/alerting)
+      const globalZoneType = this.mapZoneTypeToGlobalType(zone.type);
+      const cameraZones: CameraZoneMapping[] = sourceCameras
+        .map(camRef => {
+          const cam = topology.cameras.find(c => c.deviceId === camRef || c.name === camRef);
+          if (!cam) return null;
+          return {
+            cameraId: cam.deviceId,
+            zone: [[0, 0], [100, 0], [100, 100], [0, 100]] as ClipPath, // Full frame default
+          };
+        })
+        .filter((z): z is CameraZoneMapping => z !== null);
+
+      if (cameraZones.length > 0) {
+        const globalZone: GlobalZone = {
+          id: `global_${timestamp}`,
+          name: zone.name,
+          type: globalZoneType,
+          cameraZones,
+        };
+
+        if (!topology.globalZones) {
+          topology.globalZones = [];
+        }
+        topology.globalZones.push(globalZone);
+        this.console.log(`[Discovery] Added zone: ${zone.name} (${zone.type}) - DrawnZone and GlobalZone created`);
+      } else {
+        this.console.log(`[Discovery] Added zone: ${zone.name} (${zone.type}) - DrawnZone only (no cameras matched)`);
+      }
+
+      updated = true;
     }
 
     if (suggestion.type === 'connection' && suggestion.connection) {
       // Add new connection to topology
       const conn = suggestion.connection;
 
-      // Ensure cameras have floor plan positions for visibility
-      const fromCamera = topology.cameras.find(c => c.deviceId === conn.fromCameraId || c.name === conn.fromCameraId);
-      const toCamera = topology.cameras.find(c => c.deviceId === conn.toCameraId || c.name === conn.toCameraId);
+      // Resolve camera references - LLM may return names instead of deviceIds
+      // Use case-insensitive matching for names
+      const fromCamera = topology.cameras.find(c =>
+        c.deviceId === conn.fromCameraId ||
+        c.name === conn.fromCameraId ||
+        c.name.toLowerCase() === conn.fromCameraId.toLowerCase()
+      );
+      const toCamera = topology.cameras.find(c =>
+        c.deviceId === conn.toCameraId ||
+        c.name === conn.toCameraId ||
+        c.name.toLowerCase() === conn.toCameraId.toLowerCase()
+      );
 
-      // Auto-assign floor plan positions if missing
-      if (fromCamera && !fromCamera.floorPlanPosition) {
-        const idx = topology.cameras.indexOf(fromCamera);
-        fromCamera.floorPlanPosition = {
-          x: 150 + (idx % 3) * 200,
-          y: 150 + Math.floor(idx / 3) * 150,
-        };
-        this.console.log(`[Discovery] Auto-positioned camera: ${fromCamera.name}`);
+      // Don't create connection if cameras not found
+      if (!fromCamera || !toCamera) {
+        this.console.warn(`[Discovery] Cannot create connection: camera not found. from="${conn.fromCameraId}" to="${conn.toCameraId}"`);
+        this.console.warn(`[Discovery] Available cameras: ${topology.cameras.map(c => `${c.name} (${c.deviceId})`).join(', ')}`);
+        return;
       }
-      if (toCamera && !toCamera.floorPlanPosition) {
-        const idx = topology.cameras.indexOf(toCamera);
-        toCamera.floorPlanPosition = {
-          x: 150 + (idx % 3) * 200,
-          y: 150 + Math.floor(idx / 3) * 150,
-        };
-        this.console.log(`[Discovery] Auto-positioned camera: ${toCamera.name}`);
+
+      // Check if connection already exists
+      const existingConn = topology.connections.find(c =>
+        (c.fromCameraId === fromCamera.deviceId && c.toCameraId === toCamera.deviceId) ||
+        (c.bidirectional && c.fromCameraId === toCamera.deviceId && c.toCameraId === fromCamera.deviceId)
+      );
+      if (existingConn) {
+        this.console.log(`[Discovery] Connection already exists between ${fromCamera.name} and ${toCamera.name}`);
+        return;
+      }
+
+      // Warn if cameras don't have positions yet
+      if (!fromCamera.floorPlanPosition || !toCamera.floorPlanPosition) {
+        this.console.warn(`[Discovery] Note: One or both cameras not positioned on floor plan yet`);
       }
 
       const newConnection = {
         id: `conn_${Date.now()}`,
-        fromCameraId: fromCamera?.deviceId || conn.fromCameraId,
-        toCameraId: toCamera?.deviceId || conn.toCameraId,
+        fromCameraId: fromCamera.deviceId,
+        toCameraId: toCamera.deviceId,
         bidirectional: conn.bidirectional,
         // Default exit/entry zones covering full frame
         exitZone: [[0, 0], [100, 0], [100, 100], [0, 100]] as [number, number][],
@@ -1953,7 +2005,7 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       topology.connections.push(newConnection);
       updated = true;
 
-      this.console.log(`[Discovery] Added connection: ${fromCamera?.name || conn.fromCameraId} -> ${toCamera?.name || conn.toCameraId}`);
+      this.console.log(`[Discovery] Added connection: ${fromCamera.name} (${fromCamera.deviceId}) -> ${toCamera.name} (${toCamera.deviceId})`);
     }
 
     if (updated) {
@@ -1961,6 +2013,25 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       this.storage.setItem('topology', JSON.stringify(topology));
       this.trackingEngine.updateTopology(topology);
     }
+  }
+
+  /** Map discovered zone types to GlobalZone types for tracking/alerting */
+  private mapZoneTypeToGlobalType(type: string): GlobalZoneType {
+    const mapping: Record<string, GlobalZoneType> = {
+      'yard': 'dwell',
+      'driveway': 'entry',
+      'street': 'entry',
+      'patio': 'dwell',
+      'walkway': 'entry',
+      'parking': 'dwell',
+      'garden': 'dwell',
+      'pool': 'restricted',
+      'entrance': 'entry',
+      'garage': 'entry',
+      'deck': 'dwell',
+      'custom': 'dwell',
+    };
+    return mapping[type] || 'dwell';
   }
 
   private serveEditorUI(response: HttpResponse): void {
