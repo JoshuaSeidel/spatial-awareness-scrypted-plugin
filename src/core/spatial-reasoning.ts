@@ -86,38 +86,54 @@ export async function mediaObjectToBase64(mediaObject: MediaObject): Promise<Ima
   try {
     console.log(`[Image] Converting MediaObject, mimeType=${mediaObject?.mimeType}`);
 
-    // Convert MediaObject to Buffer using mediaManager
-    const buffer = await mediaManager.convertMediaObjectToBuffer(mediaObject, ScryptedMimeTypes.Image);
+    // First convert to JPEG to ensure consistent format
+    const jpegMediaObject = await mediaManager.convertMediaObject(mediaObject, 'image/jpeg') as MediaObject;
+    console.log(`[Image] Converted to JPEG MediaObject`);
 
-    if (!buffer) {
-      console.warn('[Image] convertMediaObjectToBuffer returned null/undefined');
-      return null;
-    }
+    // Get the buffer from the converted media object
+    const buffer = await mediaManager.convertMediaObjectToBuffer(jpegMediaObject, 'image/jpeg');
 
-    console.log(`[Image] Buffer received: ${buffer.length} bytes`);
+    // Check if we got an actual Buffer (not a proxy)
+    const isRealBuffer = Buffer.isBuffer(buffer);
+    const bufferLength = isRealBuffer ? buffer.length : 0;
 
-    if (buffer.length === 0) {
-      console.warn('[Image] Buffer is empty (0 bytes)');
+    console.log(`[Image] Buffer: isBuffer=${isRealBuffer}, length=${bufferLength}`);
+
+    if (!isRealBuffer || bufferLength === 0) {
+      console.warn('[Image] Did not receive a valid Buffer');
+
+      // Try alternate approach: get raw data using any type
+      try {
+        const anyMedia = mediaObject as any;
+        if (typeof anyMedia.getData === 'function') {
+          const data = await anyMedia.getData();
+          if (data && Buffer.isBuffer(data)) {
+            console.log(`[Image] Got data from getData(): ${data.length} bytes`);
+            if (data.length > 1000) {
+              const base64 = data.toString('base64');
+              return { base64, mediaType: 'image/jpeg' };
+            }
+          }
+        }
+      } catch (dataErr) {
+        console.warn('[Image] getData() failed:', dataErr);
+      }
+
       return null;
     }
 
     // Check if buffer is too small to be a valid image (< 1KB is suspicious)
-    if (buffer.length < 1000) {
-      // Log what the buffer contains - might be an error message
-      const bufferContent = buffer.toString('utf8').substring(0, 100);
-      console.warn(`[Image] Buffer too small (${buffer.length} bytes), content: ${bufferContent}`);
+    if (bufferLength < 1000) {
+      console.warn(`[Image] Buffer too small: ${bufferLength} bytes`);
       return null;
     }
 
     // Convert buffer to base64 (raw, no data URL prefix)
     const base64 = buffer.toString('base64');
 
-    // Determine MIME type - default to JPEG for camera images
-    const mediaType = mediaObject.mimeType?.split(';')[0] || 'image/jpeg';
+    console.log(`[Image] Converted to base64: ${base64.length} chars`);
 
-    console.log(`[Image] Converted to base64: ${base64.length} chars, type=${mediaType}`);
-
-    return { base64, mediaType };
+    return { base64, mediaType: 'image/jpeg' };
   } catch (e) {
     console.warn('[Image] Failed to convert MediaObject to base64:', e);
     return null;
