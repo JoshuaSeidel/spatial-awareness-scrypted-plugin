@@ -1,1 +1,0 @@
-[Scrypted SDK](https://developer.scrypted.app)
