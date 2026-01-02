@@ -51,6 +51,7 @@ Done! Your camera topology is configured.
 ### Visual Editor
 - **Floor Plan** - Upload image or draw with built-in tools
 - **Drag & Drop** - Place cameras, draw connections
+- **Polygon Zone Drawing** - Draw custom zones (yards, driveways, patios, etc.)
 - **Live Tracking** - Watch objects move in real-time
 
 ### AI Features (optional)
@@ -58,6 +59,7 @@ Done! Your camera topology is configured.
 - **Auto-Learning** - Transit times adjust based on observations
 - **Connection Suggestions** - System suggests new camera paths
 - **Landmark Discovery** - AI identifies landmarks from footage
+- **Auto-Topology Discovery** - Vision LLM analyzes camera views to build topology
 
 ### Integrations
 - **MQTT** - Home Assistant integration
@@ -169,6 +171,98 @@ Base URL: `/endpoint/@blueharford/scrypted-spatial-awareness`
 | `/api/training/end` | POST | End session, get results |
 | `/api/training/apply` | POST | Apply results to topology |
 | `/api/training/status` | GET | Current training status |
+
+### Discovery API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/discovery/scan` | POST | Run full discovery scan |
+| `/api/discovery/status` | GET | Current discovery status |
+| `/api/discovery/suggestions` | GET | Pending suggestions |
+| `/api/discovery/camera/{id}` | GET | Analyze single camera |
+
+## Auto-Topology Discovery
+
+The plugin can automatically analyze camera views using a vision-capable LLM to discover landmarks, zones, and camera connections.
+
+### How It Works
+
+1. **Capture Snapshots** - System takes a picture from each camera
+2. **Scene Analysis** - Vision LLM identifies landmarks, zones, and edges in each view
+3. **Cross-Camera Correlation** - LLM correlates findings across cameras to identify shared landmarks and connections
+4. **Suggestions** - Discoveries are presented as suggestions you can accept or reject
+
+### Using Discovery
+
+**Manual Scan:**
+1. Open the topology editor (`/ui/editor`)
+2. Find the "Auto-Discovery" section in the sidebar
+3. Click "Scan Now"
+4. Review and accept/reject suggestions
+
+**Automatic Scan:**
+- Set `Auto-Discovery Interval (hours)` in plugin settings
+- System will periodically scan and generate suggestions
+- Set to 0 to disable automatic scanning
+
+### Discovery Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Auto-Discovery Interval | 0 (disabled) | Hours between automatic scans (0 = disabled) |
+| Min Landmark Confidence | 0.6 | Minimum confidence for landmark suggestions |
+| Min Connection Confidence | 0.5 | Minimum confidence for connection suggestions |
+| Auto-Accept Threshold | 0.85 | Auto-accept suggestions above this confidence |
+
+> **Rate Limiting Note:** If you set the interval to less than 1 hour, a warning will appear in the discovery status. Frequent scans can consume significant LLM API quota and may be rate-limited by your provider.
+
+### Requirements
+
+- **Vision-capable LLM** - Install @scrypted/llm with a vision model (OpenAI GPT-4V, Claude, etc.)
+- **Camera access** - Plugin needs camera.takePicture() capability
+
+### What Gets Discovered
+
+- **Landmarks**: Doors, gates, mailbox, garage, structures, fences
+- **Zones**: Front yard, driveway, patio, street, walkways
+- **Connections**: Suggested camera paths with transit time estimates
+- **Edges**: What's visible at frame boundaries (for correlation)
+
+## Zone Drawing
+
+The visual editor includes a polygon zone drawing tool for marking areas on your floor plan.
+
+### How to Draw Zones
+
+1. Click the **Draw Zone** button in the toolbar (green)
+2. Enter a zone name and select the type (yard, driveway, patio, etc.)
+3. Click **Start Drawing**
+4. Click on the canvas to add polygon points
+5. **Double-click** or press **Enter** to finish the zone
+6. Press **Escape** to cancel, **Backspace** to undo last point
+
+### Zone Types
+
+| Type | Color | Description |
+|------|-------|-------------|
+| Yard | Green | Front yard, backyard, side yard |
+| Driveway | Gray | Driveway, parking area |
+| Street | Dark Gray | Street, sidewalk |
+| Patio | Orange | Patio, deck |
+| Walkway | Brown | Walkways, paths |
+| Parking | Light Gray | Parking lot, parking space |
+| Garden | Light Green | Garden, landscaped area |
+| Pool | Blue | Pool area |
+| Garage | Medium Gray | Garage area |
+| Entrance | Pink | Entry areas |
+| Custom | Purple | Custom zone type |
+
+### Using Zones
+
+- Click on a zone to select it and edit its properties
+- Zones are color-coded by type for easy identification
+- Zones help provide context for object movement descriptions
+- Auto-Discovery can suggest zones based on camera analysis
 
 ## MQTT Topics
 

@@ -98,6 +98,15 @@ export const EDITOR_HTML = `<!DOCTYPE html>
             <div class="landmark-item" style="color: #666; text-align: center; cursor: default; padding: 8px;">No landmarks configured</div>
           </div>
         </div>
+        <div class="section">
+          <div class="section-title">
+            <span>Zones</span>
+            <button class="btn btn-small" onclick="setTool('zone')" style="background: #2e7d32;">+ Draw</button>
+          </div>
+          <div id="zone-list">
+            <div class="zone-item" style="color: #666; text-align: center; cursor: default; padding: 8px;">No zones drawn</div>
+          </div>
+        </div>
         <div class="section" id="suggestions-section" style="display: none;">
           <div class="section-title">
             <span>AI Suggestions</span>
@@ -111,6 +120,16 @@ export const EDITOR_HTML = `<!DOCTYPE html>
             <button class="btn btn-small" onclick="loadConnectionSuggestions()">Refresh</button>
           </div>
           <div id="connection-suggestions-list"></div>
+        </div>
+        <div class="section" id="discovery-section">
+          <div class="section-title">
+            <span>Auto-Discovery</span>
+            <button class="btn btn-small btn-primary" id="scan-now-btn" onclick="runDiscoveryScan()">Scan Now</button>
+          </div>
+          <div id="discovery-status" style="font-size: 11px; color: #888; margin-bottom: 8px;">
+            <span id="discovery-status-text">Not scanned yet</span>
+          </div>
+          <div id="discovery-suggestions-list"></div>
         </div>
         <div class="section" id="live-tracking-section">
           <div class="section-title">
@@ -134,6 +153,7 @@ export const EDITOR_HTML = `<!DOCTYPE html>
           <button class="btn" id="tool-select" onclick="setTool('select')">Select</button>
           <button class="btn" id="tool-wall" onclick="setTool('wall')">Draw Wall</button>
           <button class="btn" id="tool-room" onclick="setTool('room')">Draw Room</button>
+          <button class="btn" id="tool-zone" onclick="setTool('zone')" style="background: #2e7d32;">Draw Zone</button>
           <button class="btn" id="tool-camera" onclick="setTool('camera')">Place Camera</button>
           <button class="btn" id="tool-landmark" onclick="setTool('landmark')">Place Landmark</button>
           <button class="btn" id="tool-connect" onclick="setTool('connect')">Connect</button>
@@ -304,6 +324,41 @@ export const EDITOR_HTML = `<!DOCTYPE html>
     </div>
   </div>
 
+  <div class="modal-overlay" id="add-zone-modal">
+    <div class="modal">
+      <h2>Create Zone</h2>
+      <p style="color: #888; margin-bottom: 15px; font-size: 13px;">Click points on the canvas to draw a polygon. Double-click or press Enter to finish.</p>
+      <div class="form-group">
+        <label>Zone Name</label>
+        <input type="text" id="zone-name-input" placeholder="e.g., Front Yard">
+      </div>
+      <div class="form-group">
+        <label>Zone Type</label>
+        <select id="zone-type-select">
+          <option value="yard">Yard</option>
+          <option value="driveway">Driveway</option>
+          <option value="street">Street</option>
+          <option value="patio">Patio/Deck</option>
+          <option value="walkway">Walkway</option>
+          <option value="parking">Parking</option>
+          <option value="garden">Garden</option>
+          <option value="pool">Pool Area</option>
+          <option value="garage">Garage</option>
+          <option value="entrance">Entrance</option>
+          <option value="custom">Custom</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Description (optional)</label>
+        <input type="text" id="zone-desc-input" placeholder="e.g., Main front lawn area">
+      </div>
+      <div class="modal-actions">
+        <button class="btn" onclick="cancelZoneDrawing()">Cancel</button>
+        <button class="btn btn-primary" onclick="startZoneDrawing()">Start Drawing</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     let topology = { version: '2.0', cameras: [], connections: [], globalZones: [], landmarks: [], relationships: [], floorPlan: null, drawings: [] };
     let selectedItem = null;
@@ -322,6 +377,40 @@ export const EDITOR_HTML = `<!DOCTYPE html>
     let drawStart = null;
     let currentDrawing = null;
     let blankCanvasMode = false;
+
+    // Zone drawing state
+    let zoneDrawingMode = false;
+    let currentZonePoints = [];
+    let pendingZoneConfig = null;
+
+    // Zone colors by type
+    const ZONE_COLORS = {
+      yard: 'rgba(76, 175, 80, 0.3)',
+      driveway: 'rgba(158, 158, 158, 0.3)',
+      street: 'rgba(96, 96, 96, 0.3)',
+      patio: 'rgba(255, 152, 0, 0.3)',
+      walkway: 'rgba(121, 85, 72, 0.3)',
+      parking: 'rgba(189, 189, 189, 0.3)',
+      garden: 'rgba(139, 195, 74, 0.3)',
+      pool: 'rgba(33, 150, 243, 0.3)',
+      garage: 'rgba(117, 117, 117, 0.3)',
+      entrance: 'rgba(233, 30, 99, 0.3)',
+      custom: 'rgba(156, 39, 176, 0.3)',
+    };
+    const ZONE_STROKE_COLORS = {
+      yard: '#4caf50',
+      driveway: '#9e9e9e',
+      street: '#606060',
+      patio: '#ff9800',
+      walkway: '#795548',
+      parking: '#bdbdbd',
+      garden: '#8bc34a',
+      pool: '#2196f3',
+      garage: '#757575',
+      entrance: '#e91e63',
+      custom: '#9c27b0',
+    };
+
     const canvas = document.getElementById('floor-plan-canvas');
     const ctx = canvas.getContext('2d');
 
@@ -331,6 +420,8 @@ export const EDITOR_HTML = `<!DOCTYPE html>
       await loadLandmarkTemplates();
       await loadSuggestions();
       await loadConnectionSuggestions();
+      await loadDiscoveryStatus();
+      await loadDiscoverySuggestions();
       resizeCanvas();
       render();
       updateUI();
@@ -501,6 +592,126 @@ export const EDITOR_HTML = `<!DOCTYPE html>
         await loadConnectionSuggestions();
         setStatus('Connection suggestion rejected', 'success');
       } catch (e) { console.error('Failed to reject connection suggestion:', e); }
+    }
+
+    // ==================== Auto-Discovery ====================
+    let discoverySuggestions = [];
+    let discoveryStatus = { isScanning: false, lastScanTime: null, pendingSuggestions: 0 };
+
+    async function loadDiscoveryStatus() {
+      try {
+        const response = await fetch('../api/discovery/status');
+        if (response.ok) {
+          discoveryStatus = await response.json();
+          updateDiscoveryStatusUI();
+        }
+      } catch (e) { console.error('Failed to load discovery status:', e); }
+    }
+
+    async function loadDiscoverySuggestions() {
+      try {
+        const response = await fetch('../api/discovery/suggestions');
+        if (response.ok) {
+          const data = await response.json();
+          discoverySuggestions = data.suggestions || [];
+          updateDiscoverySuggestionsUI();
+        }
+      } catch (e) { console.error('Failed to load discovery suggestions:', e); }
+    }
+
+    function updateDiscoveryStatusUI() {
+      const statusText = document.getElementById('discovery-status-text');
+      const scanBtn = document.getElementById('scan-now-btn');
+
+      if (discoveryStatus.isScanning) {
+        statusText.textContent = 'Scanning cameras...';
+        scanBtn.disabled = true;
+        scanBtn.textContent = 'Scanning...';
+      } else if (discoveryStatus.lastScanTime) {
+        const ago = Math.round((Date.now() - discoveryStatus.lastScanTime) / 1000 / 60);
+        const agoStr = ago < 1 ? 'just now' : ago + 'm ago';
+        statusText.textContent = 'Last scan: ' + agoStr + ' | ' + discoveryStatus.pendingSuggestions + ' suggestions';
+        scanBtn.disabled = false;
+        scanBtn.textContent = 'Scan Now';
+      } else {
+        statusText.textContent = 'Not scanned yet';
+        scanBtn.disabled = false;
+        scanBtn.textContent = 'Scan Now';
+      }
+    }
+
+    function updateDiscoverySuggestionsUI() {
+      const list = document.getElementById('discovery-suggestions-list');
+      if (discoverySuggestions.length === 0) {
+        list.innerHTML = '<div style="color: #666; font-size: 11px; text-align: center; padding: 8px;">No pending suggestions</div>';
+        return;
+      }
+      list.innerHTML = discoverySuggestions.map(s => {
+        const name = s.type === 'landmark' ? s.landmark?.name : (s.type === 'connection' ? s.connection?.via : s.zone?.name);
+        const typeLabel = s.type === 'landmark' ? s.landmark?.type : s.type;
+        return '<div class="camera-item" style="display: flex; justify-content: space-between; align-items: center; padding: 8px;">' +
+          '<div><div class="camera-name" style="font-size: 12px;">' + (name || 'Unknown') + '</div>' +
+          '<div class="camera-info">' + typeLabel + ' - ' + Math.round(s.confidence * 100) + '% confidence</div></div>' +
+          '<div style="display: flex; gap: 4px;">' +
+          '<button class="btn btn-small btn-primary" onclick="acceptDiscoverySuggestion(\\'' + s.id + '\\')">✓</button>' +
+          '<button class="btn btn-small" onclick="rejectDiscoverySuggestion(\\'' + s.id + '\\')">✗</button>' +
+          '</div></div>';
+      }).join('');
+    }
+
+    async function runDiscoveryScan() {
+      const scanBtn = document.getElementById('scan-now-btn');
+      scanBtn.disabled = true;
+      scanBtn.textContent = 'Scanning...';
+      setStatus('Starting discovery scan...', 'warning');
+
+      try {
+        const response = await fetch('../api/discovery/scan', { method: 'POST' });
+        if (response.ok) {
+          const result = await response.json();
+          discoveryStatus = result.status || discoveryStatus;
+          discoverySuggestions = result.suggestions || [];
+          updateDiscoveryStatusUI();
+          updateDiscoverySuggestionsUI();
+          setStatus('Discovery scan complete: ' + discoverySuggestions.length + ' suggestions found', 'success');
+
+          // Also reload topology to get any auto-accepted items
+          await loadTopology();
+          updateUI();
+          render();
+        } else {
+          const error = await response.json();
+          setStatus('Scan failed: ' + (error.error || 'Unknown error'), 'error');
+        }
+      } catch (e) {
+        console.error('Discovery scan failed:', e);
+        setStatus('Discovery scan failed', 'error');
+      } finally {
+        scanBtn.disabled = false;
+        scanBtn.textContent = 'Scan Now';
+      }
+    }
+
+    async function acceptDiscoverySuggestion(id) {
+      try {
+        const response = await fetch('../api/discovery/suggestions/' + id + '/accept', { method: 'POST' });
+        if (response.ok) {
+          // Reload topology and suggestions
+          await loadTopology();
+          await loadDiscoverySuggestions();
+          updateUI();
+          render();
+          setStatus('Suggestion accepted', 'success');
+        }
+      } catch (e) { console.error('Failed to accept discovery suggestion:', e); }
+    }
+
+    async function rejectDiscoverySuggestion(id) {
+      try {
+        await fetch('../api/discovery/suggestions/' + id + '/reject', { method: 'POST' });
+        await loadDiscoverySuggestions();
+        setStatus('Suggestion rejected', 'success');
+      } catch (e) { console.error('Failed to reject discovery suggestion:', e); }
     }
 
     // ==================== Live Tracking ====================
@@ -782,6 +993,43 @@ export const EDITOR_HTML = `<!DOCTYPE html>
           ctx.strokeRect(currentDrawing.x, currentDrawing.y, currentDrawing.width, currentDrawing.height);
         }
       }
+
+      // Draw saved zones
+      if (topology.drawnZones) {
+        for (const zone of topology.drawnZones) {
+          drawZone(zone);
+        }
+      }
+
+      // Draw zone currently being drawn
+      if (zoneDrawingMode && currentZonePoints.length > 0) {
+        const color = pendingZoneConfig ? (ZONE_COLORS[pendingZoneConfig.type] || ZONE_COLORS.custom) : 'rgba(233, 69, 96, 0.3)';
+        const strokeColor = pendingZoneConfig ? (ZONE_STROKE_COLORS[pendingZoneConfig.type] || ZONE_STROKE_COLORS.custom) : '#e94560';
+
+        ctx.beginPath();
+        ctx.moveTo(currentZonePoints[0].x, currentZonePoints[0].y);
+        for (let i = 1; i < currentZonePoints.length; i++) {
+          ctx.lineTo(currentZonePoints[i].x, currentZonePoints[i].y);
+        }
+        ctx.strokeStyle = strokeColor;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Draw points
+        for (const pt of currentZonePoints) {
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, 5, 0, Math.PI * 2);
+          ctx.fillStyle = strokeColor;
+          ctx.fill();
+        }
+
+        // Draw instruction text
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 12px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText('Click to add points. Double-click or press Enter to finish. Esc to cancel.', 10, canvas.height - 10);
+      }
+
       // Draw landmarks first (below cameras and connections)
       for (const landmark of (topology.landmarks || [])) {
         if (landmark.position) { drawLandmark(landmark); }
@@ -902,6 +1150,47 @@ export const EDITOR_HTML = `<!DOCTYPE html>
           ctx.fillText(obj.label.slice(0, 10), pos.x, pos.y + 20);
         }
       }
+    }
+
+    function drawZone(zone) {
+      if (!zone.polygon || zone.polygon.length < 3) return;
+
+      const isSelected = selectedItem?.type === 'zone' && selectedItem?.id === zone.id;
+      const fillColor = zone.color || ZONE_COLORS[zone.type] || ZONE_COLORS.custom;
+      const strokeColor = ZONE_STROKE_COLORS[zone.type] || ZONE_STROKE_COLORS.custom;
+
+      // Draw filled polygon
+      ctx.beginPath();
+      ctx.moveTo(zone.polygon[0].x, zone.polygon[0].y);
+      for (let i = 1; i < zone.polygon.length; i++) {
+        ctx.lineTo(zone.polygon[i].x, zone.polygon[i].y);
+      }
+      ctx.closePath();
+      ctx.fillStyle = fillColor;
+      ctx.fill();
+      ctx.strokeStyle = isSelected ? '#e94560' : strokeColor;
+      ctx.lineWidth = isSelected ? 3 : 2;
+      ctx.stroke();
+
+      // Draw zone label at centroid
+      const centroid = getPolygonCentroid(zone.polygon);
+      ctx.fillStyle = isSelected ? '#e94560' : '#fff';
+      ctx.font = 'bold 12px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(zone.name, centroid.x, centroid.y);
+      ctx.font = '10px sans-serif';
+      ctx.fillStyle = '#ccc';
+      ctx.fillText(zone.type, centroid.x, centroid.y + 14);
+    }
+
+    function getPolygonCentroid(polygon) {
+      let x = 0, y = 0;
+      for (const pt of polygon) {
+        x += pt.x;
+        y += pt.y;
+      }
+      return { x: x / polygon.length, y: y / polygon.length };
     }
 
     function drawLandmark(landmark) {
@@ -1186,6 +1475,17 @@ export const EDITOR_HTML = `<!DOCTYPE html>
       } else {
         landmarkList.innerHTML = landmarks.map(l => '<div class="camera-item ' + (selectedItem?.type === 'landmark' && selectedItem?.id === l.id ? 'selected' : '') + '" onclick="selectLandmark(\\'' + l.id + '\\')"><div class="camera-name">' + l.name + '</div><div class="camera-info">' + l.type + (l.isEntryPoint ? ' | Entry' : '') + (l.isExitPoint ? ' | Exit' : '') + '</div></div>').join('');
       }
+      // Zone list
+      const zoneList = document.getElementById('zone-list');
+      const zones = topology.drawnZones || [];
+      if (zones.length === 0) {
+        zoneList.innerHTML = '<div class="zone-item" style="color: #666; text-align: center; cursor: default; padding: 8px;">No zones drawn</div>';
+      } else {
+        zoneList.innerHTML = zones.map(z => {
+          const color = ZONE_STROKE_COLORS[z.type] || ZONE_STROKE_COLORS.custom;
+          return '<div class="camera-item ' + (selectedItem?.type === 'zone' && selectedItem?.id === z.id ? 'selected' : '') + '" onclick="selectZone(\\'' + z.id + '\\')" style="border-left: 3px solid ' + color + ';"><div class="camera-name">' + z.name + '</div><div class="camera-info">' + z.type + ' | ' + z.polygon.length + ' points</div></div>';
+        }).join('');
+      }
       document.getElementById('camera-count').textContent = topology.cameras.length;
       document.getElementById('connection-count').textContent = topology.connections.length;
       document.getElementById('landmark-count').textContent = landmarks.length;
@@ -1226,11 +1526,126 @@ export const EDITOR_HTML = `<!DOCTYPE html>
     function deleteCamera(id) { if (!confirm('Delete this camera?')) return; topology.cameras = topology.cameras.filter(c => c.deviceId !== id); topology.connections = topology.connections.filter(c => c.fromCameraId !== id && c.toCameraId !== id); selectedItem = null; document.getElementById('properties-panel').innerHTML = '<h3>Properties</h3><p style="color: #666;">Select a camera or connection.</p>'; updateCameraSelects(); updateUI(); render(); }
     function deleteConnection(id) { if (!confirm('Delete this connection?')) return; topology.connections = topology.connections.filter(c => c.id !== id); selectedItem = null; document.getElementById('properties-panel').innerHTML = '<h3>Properties</h3><p style="color: #666;">Select a camera or connection.</p>'; updateUI(); render(); }
     function setTool(tool) {
+      // If switching away from zone tool while drawing, cancel
+      if (currentTool === 'zone' && tool !== 'zone' && zoneDrawingMode) {
+        cancelZoneDrawing();
+      }
       currentTool = tool;
       setStatus('Tool: ' + tool, 'success');
       document.querySelectorAll('.toolbar .btn').forEach(b => b.style.background = '');
       const btn = document.getElementById('tool-' + tool);
-      if (btn) btn.style.background = '#e94560';
+      if (btn) btn.style.background = tool === 'zone' ? '#2e7d32' : '#e94560';
+
+      // If zone tool selected, open the zone config modal
+      if (tool === 'zone') {
+        openZoneModal();
+      }
+    }
+
+    // ==================== Zone Drawing Functions ====================
+
+    function openZoneModal() {
+      document.getElementById('zone-name-input').value = '';
+      document.getElementById('zone-type-select').value = 'yard';
+      document.getElementById('zone-desc-input').value = '';
+      document.getElementById('add-zone-modal').classList.add('active');
+    }
+
+    function startZoneDrawing() {
+      const name = document.getElementById('zone-name-input').value.trim();
+      const type = document.getElementById('zone-type-select').value;
+      const description = document.getElementById('zone-desc-input').value.trim();
+
+      if (!name) {
+        alert('Please enter a zone name');
+        return;
+      }
+
+      pendingZoneConfig = { name, type, description };
+      zoneDrawingMode = true;
+      currentZonePoints = [];
+      closeModal('add-zone-modal');
+      setStatus('Zone drawing mode - click to add points, double-click to finish', 'warning');
+      render();
+    }
+
+    function cancelZoneDrawing() {
+      zoneDrawingMode = false;
+      currentZonePoints = [];
+      pendingZoneConfig = null;
+      closeModal('add-zone-modal');
+      setTool('select');
+      setStatus('Zone drawing cancelled', 'success');
+      render();
+    }
+
+    function finishZoneDrawing() {
+      if (currentZonePoints.length < 3) {
+        alert('A zone needs at least 3 points');
+        return;
+      }
+
+      if (!pendingZoneConfig) {
+        cancelZoneDrawing();
+        return;
+      }
+
+      // Create the zone
+      const zone = {
+        id: 'zone_' + Date.now(),
+        name: pendingZoneConfig.name,
+        type: pendingZoneConfig.type,
+        description: pendingZoneConfig.description || undefined,
+        polygon: currentZonePoints.map(pt => ({ x: pt.x, y: pt.y })),
+      };
+
+      if (!topology.drawnZones) topology.drawnZones = [];
+      topology.drawnZones.push(zone);
+
+      // Reset state
+      zoneDrawingMode = false;
+      currentZonePoints = [];
+      pendingZoneConfig = null;
+
+      setTool('select');
+      updateUI();
+      render();
+      setStatus('Zone "' + zone.name + '" created with ' + zone.polygon.length + ' points', 'success');
+    }
+
+    function selectZone(id) {
+      selectedItem = { type: 'zone', id };
+      showZoneProperties(id);
+      render();
+    }
+
+    function showZoneProperties(id) {
+      const zone = (topology.drawnZones || []).find(z => z.id === id);
+      if (!zone) return;
+
+      const panel = document.getElementById('properties-panel');
+      panel.innerHTML = '<h3>Zone Properties</h3>' +
+        '<div class="form-group"><label>Name</label><input type="text" value="' + zone.name + '" onchange="updateZoneName(\\'' + id + '\\', this.value)"></div>' +
+        '<div class="form-group"><label>Type</label><select onchange="updateZoneType(\\'' + id + '\\', this.value)">' +
+        ['yard','driveway','street','patio','walkway','parking','garden','pool','garage','entrance','custom'].map(t =>
+          '<option value="' + t + '"' + (zone.type === t ? ' selected' : '') + '>' + t.charAt(0).toUpperCase() + t.slice(1) + '</option>'
+        ).join('') + '</select></div>' +
+        '<div class="form-group"><label>Description</label><input type="text" value="' + (zone.description || '') + '" onchange="updateZoneDesc(\\'' + id + '\\', this.value)"></div>' +
+        '<div class="form-group"><label>Points: ' + zone.polygon.length + '</label></div>' +
+        '<button class="btn btn-primary" onclick="deleteZone(\\'' + id + '\\')" style="background: #dc2626; width: 100%;">Delete Zone</button>';
+    }
+
+    function updateZoneName(id, value) { const z = (topology.drawnZones || []).find(z => z.id === id); if (z) { z.name = value; updateUI(); render(); } }
+    function updateZoneType(id, value) { const z = (topology.drawnZones || []).find(z => z.id === id); if (z) { z.type = value; updateUI(); render(); } }
+    function updateZoneDesc(id, value) { const z = (topology.drawnZones || []).find(z => z.id === id); if (z) { z.description = value || undefined; } }
+    function deleteZone(id) {
+      if (!confirm('Delete this zone?')) return;
+      topology.drawnZones = (topology.drawnZones || []).filter(z => z.id !== id);
+      selectedItem = null;
+      document.getElementById('properties-panel').innerHTML = '<h3>Properties</h3><p style="color: #666;">Select an item to edit.</p>';
+      updateUI();
+      render();
+      setStatus('Zone deleted', 'success');
     }
 
     function useBlankCanvas() {
@@ -1258,6 +1673,14 @@ export const EDITOR_HTML = `<!DOCTYPE html>
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
 
+      // Handle zone drawing mode separately
+      if (zoneDrawingMode) {
+        currentZonePoints.push({ x, y });
+        render();
+        setStatus('Point ' + currentZonePoints.length + ' added. ' + (currentZonePoints.length < 3 ? 'Need at least 3 points.' : 'Double-click or Enter to finish.'), 'warning');
+        return;
+      }
+
       if (currentTool === 'select') {
         // Check cameras first
         for (const camera of topology.cameras) {
@@ -1271,6 +1694,13 @@ export const EDITOR_HTML = `<!DOCTYPE html>
           if (landmark.position) {
             const dist = Math.hypot(x - landmark.position.x, y - landmark.position.y);
             if (dist < 20) { selectLandmark(landmark.id); dragging = { type: 'landmark', item: landmark }; return; }
+          }
+        }
+        // Check zones (click inside polygon)
+        for (const zone of (topology.drawnZones || [])) {
+          if (zone.polygon && isPointInPolygon({ x, y }, zone.polygon)) {
+            selectZone(zone.id);
+            return;
           }
         }
       } else if (currentTool === 'wall') {
@@ -1289,6 +1719,27 @@ export const EDITOR_HTML = `<!DOCTYPE html>
         topology._pendingLandmarkPos = { x, y };
       }
     });
+
+    // Double-click to finish zone drawing
+    canvas.addEventListener('dblclick', (e) => {
+      if (zoneDrawingMode && currentZonePoints.length >= 3) {
+        finishZoneDrawing();
+      }
+    });
+
+    // Point-in-polygon test (ray casting algorithm)
+    function isPointInPolygon(point, polygon) {
+      let inside = false;
+      for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+        const xi = polygon[i].x, yi = polygon[i].y;
+        const xj = polygon[j].x, yj = polygon[j].y;
+        if (((yi > point.y) !== (yj > point.y)) &&
+            (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi)) {
+          inside = !inside;
+        }
+      }
+      return inside;
+    }
 
     canvas.addEventListener('mousemove', (e) => {
       const rect = canvas.getBoundingClientRect();
@@ -1350,6 +1801,21 @@ export const EDITOR_HTML = `<!DOCTYPE html>
     });
 
     window.addEventListener('resize', () => { resizeCanvas(); render(); });
+
+    // Keyboard handler for zone drawing
+    document.addEventListener('keydown', (e) => {
+      if (zoneDrawingMode) {
+        if (e.key === 'Enter' && currentZonePoints.length >= 3) {
+          finishZoneDrawing();
+        } else if (e.key === 'Escape') {
+          cancelZoneDrawing();
+        } else if (e.key === 'Backspace' && currentZonePoints.length > 0) {
+          currentZonePoints.pop();
+          render();
+          setStatus('Last point removed. ' + currentZonePoints.length + ' points remaining.', 'warning');
+        }
+      }
+    });
     init();
   </script>
 </body>

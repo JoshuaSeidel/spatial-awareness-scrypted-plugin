@@ -10,6 +10,7 @@ import sdk, {
   Camera,
   MediaObject,
   ScryptedDevice,
+  ScryptedMimeTypes,
 } from '@scrypted/sdk';
 import {
   CameraTopology,
@@ -26,7 +27,7 @@ import {
 } from '../models/topology';
 import { TrackedObject, ObjectSighting } from '../models/tracked-object';
 
-const { systemManager } = sdk;
+const { systemManager, mediaManager } = sdk;
 
 /** Configuration for the spatial reasoning engine */
 export interface SpatialReasoningConfig {
@@ -66,6 +67,29 @@ interface ContextChunk {
 interface ChatCompletionDevice extends ScryptedDevice {
   getChatCompletion?(params: any): Promise<any>;
   streamChatCompletion?(params: any): AsyncGenerator<any>;
+}
+
+/**
+ * Convert a MediaObject to a base64 data URL for vision LLM consumption
+ * @param mediaObject - MediaObject from camera.takePicture()
+ * @returns Base64 data URL (data:image/jpeg;base64,...) or null if conversion fails
+ */
+export async function mediaObjectToBase64(mediaObject: MediaObject): Promise<string | null> {
+  try {
+    // Convert MediaObject to Buffer using mediaManager
+    const buffer = await mediaManager.convertMediaObjectToBuffer(mediaObject, ScryptedMimeTypes.Image);
+
+    // Convert buffer to base64
+    const base64 = buffer.toString('base64');
+
+    // Determine MIME type - default to JPEG for camera images
+    const mimeType = mediaObject.mimeType?.split(';')[0] || 'image/jpeg';
+
+    return `data:${mimeType};base64,${base64}`;
+  } catch (e) {
+    console.warn('Failed to convert MediaObject to base64:', e);
+    return null;
+  }
 }
 
 export class SpatialReasoningEngine {
@@ -712,7 +736,7 @@ export class SpatialReasoningEngine {
     return connection.name || undefined;
   }
 
-  /** Get LLM-enhanced description using ChatCompletion interface */
+  /** Get LLM-enhanced description using ChatCompletion interface with vision support */
   private async getLlmEnhancedDescription(
     tracked: TrackedObject,
     fromCamera: CameraNode,
@@ -726,6 +750,9 @@ export class SpatialReasoningEngine {
     if (!llm || !llm.getChatCompletion) return null;
 
     try {
+      // Convert image to base64 for vision LLM
+      const imageBase64 = await mediaObjectToBase64(mediaObject);
+
       // Retrieve relevant context for RAG
       const relevantChunks = this.retrieveRelevantContext(
         fromCamera.deviceId,
@@ -746,12 +773,25 @@ export class SpatialReasoningEngine {
         ragContext
       );
 
+      // Build message content - use multimodal format if we have an image
+      let messageContent: any;
+      if (imageBase64) {
+        // Vision-capable multimodal message format (OpenAI compatible)
+        messageContent = [
+          { type: 'text', text: prompt },
+          { type: 'image_url', image_url: { url: imageBase64 } },
+        ];
+      } else {
+        // Fallback to text-only if image conversion failed
+        messageContent = prompt;
+      }
+
       // Call LLM using ChatCompletion interface
       const result = await llm.getChatCompletion({
         messages: [
           {
             role: 'user',
-            content: prompt,
+            content: messageContent,
           },
         ],
         max_tokens: 150,
@@ -809,7 +849,7 @@ Examples of good descriptions:
 Generate ONLY the description, nothing else:`;
   }
 
-  /** Suggest a new landmark based on AI analysis using ChatCompletion */
+  /** Suggest a new landmark based on AI analysis using ChatCompletion with vision */
   async suggestLandmark(
     cameraId: string,
     mediaObject: MediaObject,
@@ -822,6 +862,9 @@ Generate ONLY the description, nothing else:`;
     if (!llm || !llm.getChatCompletion) return null;
 
     try {
+      // Convert image to base64 for vision LLM
+      const imageBase64 = await mediaObjectToBase64(mediaObject);
+
       const prompt = `Analyze this security camera image. A ${objectClass} was detected.
 
 Looking at the surroundings and environment, identify any notable landmarks or features visible that could help describe this location. Consider:
@@ -835,12 +878,25 @@ If you can identify a clear landmark feature, respond with ONLY a JSON object:
 
 If no clear landmark is identifiable, respond with: {"name": null}`;
 
+      // Build message content - use multimodal format if we have an image
+      let messageContent: any;
+      if (imageBase64) {
+        // Vision-capable multimodal message format (OpenAI compatible)
+        messageContent = [
+          { type: 'text', text: prompt },
+          { type: 'image_url', image_url: { url: imageBase64 } },
+        ];
+      } else {
+        // Fallback to text-only if image conversion failed
+        messageContent = prompt;
+      }
+
       // Call LLM using ChatCompletion interface
       const result = await llm.getChatCompletion({
         messages: [
           {
             role: 'user',
-            content: prompt,
+            content: messageContent,
           },
         ],
         max_tokens: 100,

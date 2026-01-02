@@ -198,6 +198,57 @@ export interface CameraZoneMapping {
   zone: ClipPath;
 }
 
+// ==================== Drawn Zones (Floor Plan) ====================
+
+/** Zone type for floor plan zones */
+export type DrawnZoneType =
+  | 'yard'        // Front yard, back yard, side yard
+  | 'driveway'    // Driveway, parking area
+  | 'street'      // Street, sidewalk
+  | 'patio'       // Patio, deck
+  | 'walkway'     // Walkways, paths
+  | 'parking'     // Parking lot, parking space
+  | 'garden'      // Garden, landscaped area
+  | 'pool'        // Pool area
+  | 'garage'      // Garage area
+  | 'entrance'    // Entry areas
+  | 'custom';     // Custom zone type
+
+/** Zone colors by type */
+export const ZONE_TYPE_COLORS: Record<DrawnZoneType, string> = {
+  yard: 'rgba(76, 175, 80, 0.3)',      // Green
+  driveway: 'rgba(158, 158, 158, 0.3)', // Gray
+  street: 'rgba(96, 96, 96, 0.3)',      // Dark gray
+  patio: 'rgba(255, 152, 0, 0.3)',      // Orange
+  walkway: 'rgba(121, 85, 72, 0.3)',    // Brown
+  parking: 'rgba(189, 189, 189, 0.3)',  // Light gray
+  garden: 'rgba(139, 195, 74, 0.3)',    // Light green
+  pool: 'rgba(33, 150, 243, 0.3)',      // Blue
+  garage: 'rgba(117, 117, 117, 0.3)',   // Medium gray
+  entrance: 'rgba(233, 30, 99, 0.3)',   // Pink
+  custom: 'rgba(156, 39, 176, 0.3)',    // Purple
+};
+
+/** A zone drawn on the floor plan */
+export interface DrawnZone {
+  /** Unique identifier */
+  id: string;
+  /** Display name */
+  name: string;
+  /** Zone type */
+  type: DrawnZoneType;
+  /** Polygon points on floor plan (x, y coordinates) */
+  polygon: Point[];
+  /** Custom color override (optional) */
+  color?: string;
+  /** Linked camera IDs that can see this zone */
+  linkedCameras?: string[];
+  /** Linked landmark IDs within this zone */
+  linkedLandmarks?: string[];
+  /** Description for context */
+  description?: string;
+}
+
 // ==================== Spatial Relationships ====================
 
 /** Types of spatial relationships between entities */
@@ -297,6 +348,8 @@ export interface CameraTopology {
   relationships: SpatialRelationship[];
   /** Named zones spanning multiple cameras */
   globalZones: GlobalZone[];
+  /** Zones drawn on the floor plan */
+  drawnZones?: DrawnZone[];
   /** Floor plan configuration (optional) */
   floorPlan?: FloorPlanConfig;
   /** Pending AI landmark suggestions */

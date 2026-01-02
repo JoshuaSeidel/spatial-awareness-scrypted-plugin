@@ -36,6 +36,8 @@ import { MqttPublisher, MqttConfig } from './integrations/mqtt-publisher';
 import { EDITOR_HTML } from './ui/editor-html';
 import { TRAINING_HTML } from './ui/training-html';
 import { TrainingConfig, TrainingLandmark } from './models/training';
+import { TopologyDiscoveryEngine } from './core/topology-discovery';
+import { DiscoveryConfig, DiscoverySuggestion } from './models/discovery';
 
 const { deviceManager, systemManager, mediaManager } = sdk;
 
@@ -49,6 +51,7 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
   private trackingState: TrackingState;
   private alertManager: AlertManager;
   private mqttPublisher: MqttPublisher | null = null;
+  private discoveryEngine: TopologyDiscoveryEngine | null = null;
   private devices: Map<string, any> = new Map();
 
   storageSettings = new StorageSettings(this, {
@@ -167,6 +170,36 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       defaultValue: 0.7,
       description: 'Minimum AI confidence (0-1) to suggest a landmark',
       group: 'AI & Spatial Reasoning',
+    },
+
+    // Auto-Topology Discovery Settings
+    discoveryIntervalHours: {
+      title: 'Auto-Discovery Interval (hours)',
+      type: 'number',
+      defaultValue: 0,
+      description: 'Automatically scan cameras to discover landmarks and connections. Set to 0 to disable. Uses vision LLM to analyze camera views.',
+      group: 'Auto-Topology Discovery',
+    },
+    minLandmarkConfidence: {
+      title: 'Min Landmark Confidence',
+      type: 'number',
+      defaultValue: 0.6,
+      description: 'Minimum confidence (0-1) for discovered landmarks',
+      group: 'Auto-Topology Discovery',
+    },
+    minConnectionConfidence: {
+      title: 'Min Connection Confidence',
+      type: 'number',
+      defaultValue: 0.5,
+      description: 'Minimum confidence (0-1) for suggested camera connections',
+      group: 'Auto-Topology Discovery',
+    },
+    autoAcceptThreshold: {
+      title: 'Auto-Accept Threshold',
+      type: 'number',
+      defaultValue: 0.85,
+      description: 'Suggestions above this confidence are automatically accepted (0-1)',
+      group: 'Auto-Topology Discovery',
     },
 
     // MQTT Settings
@@ -355,6 +388,33 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
 
     await this.trackingEngine.startTracking();
     this.console.log('Tracking engine started');
+
+    // Initialize or update discovery engine
+    await this.initializeDiscoveryEngine(topology);
+  }
+
+  private async initializeDiscoveryEngine(topology: CameraTopology): Promise<void> {
+    const discoveryConfig: DiscoveryConfig = {
+      discoveryIntervalHours: this.storageSettings.values.discoveryIntervalHours as number ?? 0,
+      autoAcceptThreshold: this.storageSettings.values.autoAcceptThreshold as number ?? 0.85,
+      minLandmarkConfidence: this.storageSettings.values.minLandmarkConfidence as number ?? 0.6,
+      minConnectionConfidence: this.storageSettings.values.minConnectionConfidence as number ?? 0.5,
+    };
+
+    if (this.discoveryEngine) {
+      // Update existing engine
+      this.discoveryEngine.updateConfig(discoveryConfig);
+      this.discoveryEngine.updateTopology(topology);
+    } else {
+      // Create new engine
+      this.discoveryEngine = new TopologyDiscoveryEngine(discoveryConfig, this.console);
+      this.discoveryEngine.updateTopology(topology);
+
+      // Start periodic discovery if enabled
+      if (discoveryConfig.discoveryIntervalHours > 0) {
+        this.discoveryEngine.startPeriodicDiscovery();
+      }
+    }
   }
 
   // ==================== DeviceProvider Implementation ====================
@@ -874,6 +934,27 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
         return this.handleTrainingApplyRequest(response);
       }
 
+      // Discovery endpoints
+      if (path.endsWith('/api/discovery/scan')) {
+        return this.handleDiscoveryScanRequest(response);
+      }
+      if (path.endsWith('/api/discovery/status')) {
+        return this.handleDiscoveryStatusRequest(response);
+      }
+      if (path.endsWith('/api/discovery/suggestions')) {
+        return this.handleDiscoverySuggestionsRequest(response);
+      }
+      if (path.match(/\/api\/discovery\/suggestions\/[\w-]+\/(accept|reject)$/)) {
+        const parts = path.split('/');
+        const action = parts.pop()!;
+        const suggestionId = parts.pop()!;
+        return this.handleDiscoverySuggestionActionRequest(suggestionId, action, response);
+      }
+      if (path.match(/\/api\/discovery\/camera\/[\w-]+$/)) {
+        const cameraId = path.split('/').pop()!;
+        return this.handleDiscoveryCameraAnalysisRequest(cameraId, response);
+      }
+
       // UI Routes
       if (path.endsWith('/ui/editor') || path.endsWith('/ui/editor/')) {
         return this.serveEditorUI(response);
@@ -890,7 +971,7 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       // Default: return info page
       response.send(JSON.stringify({
         name: 'Spatial Awareness Plugin',
-        version: '0.4.0',
+        version: '0.5.0-beta',
         endpoints: {
           api: {
             trackedObjects: '/api/tracked-objects',
@@ -910,6 +991,12 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
               status: '/api/training/status',
               landmark: '/api/training/landmark',
               apply: '/api/training/apply',
+            },
+            discovery: {
+              scan: '/api/discovery/scan',
+              status: '/api/discovery/status',
+              suggestions: '/api/discovery/suggestions',
+              camera: '/api/discovery/camera/{cameraId}',
             },
           },
           ui: {
@@ -1579,6 +1666,207 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
     response.send(JSON.stringify(result), {
       headers: { 'Content-Type': 'application/json' },
     });
+  }
+
+  // ==================== Discovery Handlers ====================
+
+  private async handleDiscoveryScanRequest(response: HttpResponse): Promise<void> {
+    if (!this.discoveryEngine) {
+      response.send(JSON.stringify({ error: 'Discovery engine not initialized. Configure topology first.' }), {
+        code: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+      return;
+    }
+
+    try {
+      this.console.log('[Discovery] Manual scan triggered via API');
+      const correlation = await this.discoveryEngine.runFullDiscovery();
+      const status = this.discoveryEngine.getStatus();
+      const suggestions = this.discoveryEngine.getPendingSuggestions();
+
+      response.send(JSON.stringify({
+        success: true,
+        status,
+        correlation,
+        suggestions,
+      }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } catch (e) {
+      this.console.error('[Discovery] Scan failed:', e);
+      response.send(JSON.stringify({ error: `Scan failed: ${(e as Error).message}` }), {
+        code: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+  }
+
+  private handleDiscoveryStatusRequest(response: HttpResponse): void {
+    if (!this.discoveryEngine) {
+      response.send(JSON.stringify({
+        isRunning: false,
+        isScanning: false,
+        lastScanTime: null,
+        nextScanTime: null,
+        camerasAnalyzed: 0,
+        pendingSuggestions: 0,
+      }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+      return;
+    }
+
+    const status = this.discoveryEngine.getStatus();
+    response.send(JSON.stringify(status), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  private handleDiscoverySuggestionsRequest(response: HttpResponse): void {
+    if (!this.discoveryEngine) {
+      response.send(JSON.stringify({ suggestions: [] }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+      return;
+    }
+
+    const suggestions = this.discoveryEngine.getPendingSuggestions();
+    response.send(JSON.stringify({ suggestions }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  private handleDiscoverySuggestionActionRequest(
+    suggestionId: string,
+    action: string,
+    response: HttpResponse
+  ): void {
+    if (!this.discoveryEngine) {
+      response.send(JSON.stringify({ error: 'Discovery engine not initialized' }), {
+        code: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+      return;
+    }
+
+    if (action === 'accept') {
+      const suggestion = this.discoveryEngine.acceptSuggestion(suggestionId);
+      if (suggestion) {
+        // Apply accepted suggestion to topology
+        this.applyDiscoverySuggestion(suggestion);
+        response.send(JSON.stringify({ success: true, suggestion }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      } else {
+        response.send(JSON.stringify({ error: 'Suggestion not found' }), {
+          code: 404,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+    } else if (action === 'reject') {
+      const success = this.discoveryEngine.rejectSuggestion(suggestionId);
+      if (success) {
+        response.send(JSON.stringify({ success: true }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      } else {
+        response.send(JSON.stringify({ error: 'Suggestion not found' }), {
+          code: 404,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+    } else {
+      response.send(JSON.stringify({ error: 'Invalid action' }), {
+        code: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+  }
+
+  private async handleDiscoveryCameraAnalysisRequest(
+    cameraId: string,
+    response: HttpResponse
+  ): Promise<void> {
+    if (!this.discoveryEngine) {
+      response.send(JSON.stringify({ error: 'Discovery engine not initialized' }), {
+        code: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+      return;
+    }
+
+    try {
+      const analysis = await this.discoveryEngine.analyzeScene(cameraId);
+      response.send(JSON.stringify(analysis), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } catch (e) {
+      response.send(JSON.stringify({ error: `Analysis failed: ${(e as Error).message}` }), {
+        code: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+  }
+
+  private applyDiscoverySuggestion(suggestion: DiscoverySuggestion): void {
+    if (!this.trackingEngine) return;
+
+    const topology = this.trackingEngine.getTopology();
+    let updated = false;
+
+    if (suggestion.type === 'landmark' && suggestion.landmark) {
+      // Add new landmark to topology
+      const landmark: Landmark = {
+        id: `landmark_${Date.now()}`,
+        name: suggestion.landmark.name!,
+        type: suggestion.landmark.type!,
+        position: suggestion.landmark.position || { x: 0, y: 0 },
+        description: suggestion.landmark.description,
+        visibleFromCameras: suggestion.landmark.visibleFromCameras,
+        aiSuggested: true,
+        aiConfidence: suggestion.confidence,
+      };
+
+      if (!topology.landmarks) {
+        topology.landmarks = [];
+      }
+      topology.landmarks.push(landmark);
+      updated = true;
+
+      this.console.log(`[Discovery] Added landmark: ${landmark.name}`);
+    }
+
+    if (suggestion.type === 'connection' && suggestion.connection) {
+      // Add new connection to topology
+      const conn = suggestion.connection;
+      const newConnection = {
+        id: `conn_${Date.now()}`,
+        fromCameraId: conn.fromCameraId,
+        toCameraId: conn.toCameraId,
+        bidirectional: conn.bidirectional,
+        // Default exit/entry zones covering full frame
+        exitZone: [[0, 0], [100, 0], [100, 100], [0, 100]] as [number, number][],
+        entryZone: [[0, 0], [100, 0], [100, 100], [0, 100]] as [number, number][],
+        transitTime: {
+          typical: conn.transitSeconds * 1000,
+          min: Math.max(1000, conn.transitSeconds * 500),
+          max: conn.transitSeconds * 2000,
+        },
+        name: conn.via ? `Via ${conn.via}` : undefined,
+      };
+
+      topology.connections.push(newConnection);
+      updated = true;
+
+      this.console.log(`[Discovery] Added connection: ${conn.fromCameraId} -> ${conn.toCameraId}`);
+    }
+
+    if (updated) {
+      // Save updated topology
+      this.storage.setItem('topology', JSON.stringify(topology));
+      this.trackingEngine.updateTopology(topology);
+    }
   }
 
   private serveEditorUI(response: HttpResponse): void {
