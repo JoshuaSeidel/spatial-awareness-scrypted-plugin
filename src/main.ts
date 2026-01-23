@@ -6,6 +6,7 @@ import sdk, {
   Setting,
   SettingValue,
   ScryptedDeviceBase,
+  ScryptedDevice,
   ScryptedDeviceType,
   ScryptedInterface,
   ScryptedNativeId,
@@ -764,6 +765,20 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
     // ==================== 8. Auto-Topology Discovery ====================
     addGroup('Auto-Topology Discovery');
 
+    if (this.discoveryEngine) {
+      const excluded = this.discoveryEngine.getExcludedVisionLlmNames();
+      if (excluded.length > 0) {
+        settings.push({
+          key: 'excludedVisionLlms',
+          title: 'Excluded LLMs (No Vision)',
+          type: 'string',
+          readonly: true,
+          value: excluded.join(', '),
+          group: 'Auto-Topology Discovery',
+        });
+      }
+    }
+
     // ==================== 9. MQTT Integration ====================
     addGroup('MQTT Integration');
 
@@ -781,6 +796,7 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       key === 'lostTimeout' ||
       key === 'useVisualMatching' ||
       key === 'loiteringThreshold' ||
+      key === 'minDetectionScore' ||
       key === 'objectAlertCooldown' ||
       key === 'useLlmDescriptions' ||
       key === 'llmDebounceInterval' ||
@@ -916,7 +932,7 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
 
       // Training Mode endpoints
       if (path.endsWith('/api/training/start')) {
-        return this.handleTrainingStartRequest(request, response);
+        return await this.handleTrainingStartRequest(request, response);
       }
       if (path.endsWith('/api/training/pause')) {
         return this.handleTrainingPauseRequest(response);
@@ -1510,13 +1526,25 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
 
   // ==================== Training Mode Handlers ====================
 
-  private handleTrainingStartRequest(request: HttpRequest, response: HttpResponse): void {
+  private async handleTrainingStartRequest(request: HttpRequest, response: HttpResponse): Promise<void> {
     if (!this.trackingEngine) {
-      response.send(JSON.stringify({ error: 'Tracking engine not running. Configure topology first.' }), {
-        code: 500,
-        headers: { 'Content-Type': 'application/json' },
-      });
-      return;
+      const topologyJson = this.storage.getItem('topology');
+      const topology = topologyJson ? JSON.parse(topologyJson) as CameraTopology : createEmptyTopology();
+
+      if (!topology.cameras?.length) {
+        const cameras = this.buildTopologyCamerasFromSettings();
+        if (cameras.length === 0) {
+          response.send(JSON.stringify({ error: 'No cameras configured. Select tracked cameras first.' }), {
+            code: 400,
+            headers: { 'Content-Type': 'application/json' },
+          });
+          return;
+        }
+        topology.cameras = cameras;
+        this.storage.setItem('topology', JSON.stringify(topology));
+      }
+
+      await this.startTrackingEngine(topology);
     }
 
     try {
@@ -2323,6 +2351,27 @@ Access the visual topology editor at \`/ui/editor\` to configure camera relation
   getTopology(): CameraTopology | null {
     const topologyJson = this.storage.getItem('topology');
     return topologyJson ? JSON.parse(topologyJson) : null;
+  }
+
+  private buildTopologyCamerasFromSettings(): CameraTopology['cameras'] {
+    const value = this.storageSettings.values.trackedCameras;
+    const cameraIds = Array.isArray(value)
+      ? value.filter(Boolean)
+      : typeof value === 'string' && value.length
+        ? [value]
+        : [];
+
+    return cameraIds.map((deviceId: string) => {
+      const device = systemManager.getDeviceById<ScryptedDevice>(deviceId);
+      return {
+        deviceId,
+        nativeId: device?.nativeId || deviceId,
+        name: device?.name || deviceId,
+        isEntryPoint: false,
+        isExitPoint: false,
+        trackClasses: [],
+      };
+    });
   }
 }
 

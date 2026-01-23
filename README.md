@@ -188,6 +188,8 @@ Base URL: `/endpoint/@blueharford/scrypted-spatial-awareness`
 
 The plugin can automatically analyze camera views using a vision-capable LLM to discover landmarks, zones, and camera connections.
 
+If a configured LLM provider does not support vision, it will be automatically excluded from discovery and shown in plugin settings under **Excluded LLMs (No Vision)**.
+
 ### How It Works
 
 1. **Capture Snapshots** - System takes a picture from each camera

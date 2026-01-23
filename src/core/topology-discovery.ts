@@ -23,6 +23,8 @@ import {
   DiscoveryStatus,
   DEFAULT_DISCOVERY_STATUS,
   RATE_LIMIT_WARNING_THRESHOLD,
+  DistanceEstimate,
+  distanceToFeet,
 } from '../models/discovery';
 import {
   CameraTopology,
@@ -40,58 +42,145 @@ interface ChatCompletionDevice extends ScryptedDevice {
 }
 
 /** Scene analysis prompt for single camera */
-const SCENE_ANALYSIS_PROMPT = `Analyze this security camera image and identify what you see.
+const SCENE_ANALYSIS_PROMPT = `You are analyzing a security camera image. Describe EVERYTHING you can see in detail.
 
-1. LANDMARKS - Identify fixed features visible:
-   - Structures (house, garage, shed, porch, deck)
-   - Features (mailbox, tree, pool, garden, fountain)
-   - Access points (door, gate, driveway entrance, walkway)
-   - Boundaries (fence, wall, hedge)
+## INSTRUCTIONS
+Look at this image carefully and identify ALL visible objects, structures, and areas. Be thorough - even small or partially visible items are important for security awareness.
 
-2. ZONES - Identify area types visible:
-   - What type of area is this? (front yard, backyard, driveway, street, patio, walkway)
-   - Estimate what percentage of the frame each zone covers (0.0 to 1.0)
+## 1. LANDMARKS - List EVERY distinct object or feature you can see:
 
-3. EDGES - What's visible at the frame edges:
-   - Top edge: (sky, roof, trees, etc.)
-   - Left edge: (fence, neighbor, street, etc.)
-   - Right edge: (fence, garage, etc.)
-   - Bottom edge: (ground, driveway, grass, etc.)
+**Structures** (buildings, parts of buildings):
+- Houses, garages, sheds, porches, decks, patios, carports, gazebos
+- Walls, pillars, columns, railings, stairs, steps
 
-4. ORIENTATION - Estimate camera facing direction based on shadows, sun position, or landmarks
+**Vegetation** (plants, trees, landscaping):
+- Trees (describe type if identifiable: oak, palm, pine, etc.)
+- Bushes, shrubs, hedges
+- Flower beds, gardens, planters, potted plants
+- Grass/lawn areas, mulch beds
 
-Respond with ONLY valid JSON in this exact format:
+**Boundaries & Barriers**:
+- Fences (wood, chain-link, aluminum, vinyl, iron, privacy)
+- Walls (brick, stone, concrete, retaining)
+- Gates, gate posts
+- Hedges used as boundaries
+
+**Access Points & Pathways**:
+- Doors (front, side, garage, screen)
+- Driveways (concrete, asphalt, gravel, pavers)
+- Walkways, sidewalks, paths, stepping stones
+- Stairs, ramps, porches
+
+**Utility & Fixtures**:
+- Mailboxes, package boxes
+- Light fixtures, lamp posts, solar lights
+- A/C units, utility boxes, meters
+- Trash cans, recycling bins
+- Hoses, spigots, sprinklers
+
+**Outdoor Items**:
+- Vehicles (cars, trucks, motorcycles, boats, trailers)
+- Furniture (chairs, tables, benches, swings)
+- Grills, fire pits, outdoor kitchens
+- Play equipment, trampolines, pools
+- Decorations, flags, signs
+
+**Off-Property Elements** (important for security context):
+- Street, road, sidewalk
+- Neighbor's property/fence/house
+- Public areas visible
+
+For EACH landmark, estimate its DISTANCE from the camera:
+- "close" = 0-10 feet (within arm's reach of camera)
+- "near" = 10-30 feet
+- "medium" = 30-60 feet
+- "far" = 60-100 feet
+- "distant" = 100+ feet (edge of property or beyond)
+
+## 2. ZONES - Identify distinct AREAS visible:
+- Front yard, backyard, side yard
+- Driveway, parking area
+- Patio, deck, porch
+- Garden area, lawn
+- Street/road
+- Neighbor's yard
+
+For each zone, provide:
+- coverage: percentage of the image it covers (0.0 to 1.0)
+- distance: how far the CENTER of the zone is from camera ("close", "near", "medium", "far", "distant")
+- boundingBox: [x, y, width, height] in normalized coordinates (0-1) where the zone appears in the image
+
+## 3. EDGES - What's at each edge of the frame:
+This helps understand what's just out of view.
+
+## 4. CAMERA CONTEXT:
+- Estimated mounting height (ground level, 8ft, 12ft, roofline, etc.)
+- Approximate field of view (narrow, medium, wide)
+- Facing direction if determinable (north, south, street-facing, etc.)
+
+Respond with ONLY valid JSON:
 {
   "landmarks": [
-    {"name": "Front Door", "type": "access", "confidence": 0.9, "description": "White front door with black frame"}
+    {"name": "Mailbox", "type": "feature", "distance": "medium", "confidence": 0.95, "description": "Black metal mailbox on wooden post, approximately 40 feet from camera"},
+    {"name": "Aluminum Fence", "type": "boundary", "distance": "near", "confidence": 0.9, "description": "Silver aluminum fence running along left side of property, about 15-20 feet away"},
+    {"name": "Large Oak Tree", "type": "feature", "distance": "far", "confidence": 0.85, "description": "Mature oak tree near property line, roughly 80 feet from camera"}
   ],
   "zones": [
-    {"name": "Front Yard", "type": "yard", "coverage": 0.4, "description": "Grass lawn area"}
+    {"name": "Front Yard", "type": "yard", "coverage": 0.5, "distance": "medium", "boundingBox": [0.2, 0.4, 0.6, 0.4], "description": "Grass lawn with some bare patches"},
+    {"name": "Driveway", "type": "driveway", "coverage": 0.25, "distance": "near", "boundingBox": [0.6, 0.5, 0.3, 0.4], "description": "Concrete driveway leading to garage"},
+    {"name": "Street", "type": "street", "coverage": 0.1, "distance": "distant", "boundingBox": [0.0, 0.1, 1.0, 0.15], "description": "Public road beyond property line"}
   ],
-  "edges": {"top": "sky with clouds", "left": "fence and trees", "right": "garage wall", "bottom": "concrete walkway"},
-  "orientation": "north"
-}`;
+  "edges": {
+    "top": "sky, tree canopy",
+    "left": "aluminum fence, neighbor's yard beyond",
+    "right": "side of house, garage door",
+    "bottom": "concrete walkway, grass edge"
+  },
+  "cameraContext": {
+    "mountHeight": "8 feet",
+    "fieldOfView": "wide",
+    "facingDirection": "street-facing"
+  }
+}
+
+BE THOROUGH. List every distinct item you can identify. A typical outdoor scene should have 5-15+ landmarks.`;
 
 /** Multi-camera correlation prompt */
-const CORRELATION_PROMPT = `I have scene analyses from multiple security cameras at the same property. Help me correlate them to understand the property layout.
+const CORRELATION_PROMPT = `I have detailed scene analyses from multiple security cameras at the same property. Help me understand which landmarks appear in multiple camera views.
 
 CAMERA SCENES:
 {scenes}
 
-Identify:
-1. Shared landmarks - Features that appear in multiple camera views
-2. Camera connections - How someone could move between camera views and estimated walking time
-3. Overall layout - Describe the property layout based on what you see
+## PRIORITY ORDER (most important first):
+
+### 1. SHARED LANDMARKS (HIGHEST PRIORITY)
+Identify features that are visible from MULTIPLE cameras. This is crucial for understanding the property layout.
+- Look for the SAME fence, tree, mailbox, driveway, structure, etc. appearing in different camera views
+- Even partial visibility counts (e.g., a tree visible in full from one camera and just the edge from another)
+- Include landmarks that are at the boundary between camera views
+
+### 2. PROPERTY LAYOUT
+Based on what each camera sees and their overlapping features, describe:
+- Which areas each camera covers
+- How the cameras relate spatially (e.g., "Camera A looks toward Camera B's direction")
+- Overall property shape and features
+
+### 3. CONNECTIONS (Lower Priority)
+Only if clearly determinable, suggest walking paths between camera views.
+
+IMPORTANT: For camera references, use the EXACT device ID shown in parentheses (e.g., "device_123"), NOT the camera name.
 
 Respond with ONLY valid JSON:
 {
   "sharedLandmarks": [
-    {"name": "Driveway", "type": "access", "seenByCameras": ["camera1", "camera2"], "confidence": 0.8, "description": "Concrete driveway"}
+    {"name": "Aluminum Fence", "type": "boundary", "seenByCameras": ["device_123", "device_456"], "confidence": 0.85, "description": "Silver aluminum fence visible on right edge of Camera A and left edge of Camera B"},
+    {"name": "Large Oak Tree", "type": "feature", "seenByCameras": ["device_123", "device_789"], "confidence": 0.9, "description": "Mature oak tree in front yard, visible from both front and side cameras"},
+    {"name": "Concrete Driveway", "type": "access", "seenByCameras": ["device_123", "device_456", "device_789"], "confidence": 0.95, "description": "Driveway visible from multiple angles"}
   ],
   "connections": [
-    {"from": "camera1", "to": "camera2", "transitSeconds": 10, "via": "driveway", "confidence": 0.7, "bidirectional": true}
+    {"from": "device_123", "to": "device_456", "transitSeconds": 8, "via": "along driveway", "confidence": 0.6, "bidirectional": true}
   ],
-  "layoutDescription": "Single-story house with front yard facing street, driveway on the left side, backyard accessible through side gate"
+  "layoutDescription": "Ranch-style house. Front camera covers front yard and street. Garage camera covers driveway entrance. Side camera covers side yard with aluminum fence separating from neighbor. Backyard camera shows deck and pool area."
 }`;
 
 export class TopologyDiscoveryEngine {
@@ -142,6 +231,13 @@ export class TopologyDiscoveryEngine {
     return { ...this.status };
   }
 
+  /** Get list of LLMs excluded for lack of vision support */
+  getExcludedVisionLlmNames(): string[] {
+    return this.llmDevices
+      .filter(l => !l.visionCapable)
+      .map(l => l.name || l.id);
+  }
+
   /** Get pending suggestions */
   getPendingSuggestions(): DiscoverySuggestion[] {
     return Array.from(this.suggestions.values())
@@ -165,11 +261,20 @@ export class TopologyDiscoveryEngine {
     return this.config.discoveryIntervalHours > 0;
   }
 
-  /** Find LLM device with ChatCompletion interface */
-  private async findLlmDevice(): Promise<ChatCompletionDevice | null> {
-    if (this.llmDevice) return this.llmDevice;
-    if (this.llmSearched) return null;
+  // Load balancing for multiple LLMs
+  private llmDevices: Array<{
+    device: ChatCompletionDevice;
+    id: string;
+    name: string;
+    providerType: LlmProvider;
+    lastUsed: number;
+    errorCount: number;
+    visionCapable: boolean;
+  }> = [];
 
+  /** Find ALL LLM devices for load balancing */
+  private async findAllLlmDevices(): Promise<void> {
+    if (this.llmSearched) return;
     this.llmSearched = true;
 
     try {
@@ -180,32 +285,127 @@ export class TopologyDiscoveryEngine {
         if (device.interfaces?.includes('ChatCompletion')) {
           const deviceName = device.name?.toLowerCase() || '';
 
-          // Detect provider type for image format selection
+          let providerType: LlmProvider = 'unknown';
           if (deviceName.includes('openai') || deviceName.includes('gpt')) {
-            this.llmProviderType = 'openai';
+            providerType = 'openai';
           } else if (deviceName.includes('anthropic') || deviceName.includes('claude')) {
-            this.llmProviderType = 'anthropic';
+            providerType = 'anthropic';
           } else if (deviceName.includes('ollama') || deviceName.includes('gemini') ||
                      deviceName.includes('google') || deviceName.includes('llama')) {
-            // These providers use OpenAI-compatible format
-            this.llmProviderType = 'openai';
-          } else {
-            this.llmProviderType = 'unknown';
+            providerType = 'openai';
           }
 
-          this.llmDevice = device as unknown as ChatCompletionDevice;
-          this.console.log(`[Discovery] Connected to LLM: ${device.name}`);
-          this.console.log(`[Discovery] Image format: ${this.llmProviderType}`);
-          return this.llmDevice;
+          this.llmDevices.push({
+            device: device as unknown as ChatCompletionDevice,
+            id,
+            name: device.name || id,
+            providerType,
+            lastUsed: 0,
+            errorCount: 0,
+            visionCapable: true,
+          });
+
+          this.console.log(`[Discovery] Found LLM: ${device.name}`);
         }
       }
 
-      this.console.warn('[Discovery] No ChatCompletion device found. Vision-based discovery unavailable.');
+      if (this.llmDevices.length === 0) {
+        this.console.warn('[Discovery] No ChatCompletion devices found. Vision-based discovery unavailable.');
+      } else {
+        this.console.log(`[Discovery] Load balancing across ${this.llmDevices.length} LLM device(s)`);
+      }
     } catch (e) {
-      this.console.error('[Discovery] Error finding LLM device:', e);
+      this.console.error('[Discovery] Error finding LLM devices:', e);
+    }
+  }
+
+  /** Find LLM device with ChatCompletion interface - uses load balancing */
+  private async findLlmDevice(): Promise<ChatCompletionDevice | null> {
+    await this.findAllLlmDevices();
+
+    if (this.llmDevices.length === 0) return null;
+
+    // If only one LLM, just use it
+    if (this.llmDevices.length === 1) {
+      const llm = this.llmDevices[0];
+      this.llmDevice = llm.device;
+      this.llmProviderType = llm.providerType;
+      return llm.device;
     }
 
-    return null;
+    // Find the LLM with oldest lastUsed time (least recently used)
+    let bestIndex = 0;
+    let bestScore = Infinity;
+
+    for (let i = 0; i < this.llmDevices.length; i++) {
+      const llm = this.llmDevices[i];
+      const score = llm.lastUsed + (llm.errorCount * 60000);
+      if (score < bestScore) {
+        bestScore = score;
+        bestIndex = i;
+      }
+    }
+
+    const selected = this.llmDevices[bestIndex];
+    this.llmDevice = selected.device;
+    this.llmProviderType = selected.providerType;
+
+    // Mark as used
+    selected.lastUsed = Date.now();
+
+    this.console.log(`[Discovery] Selected LLM: ${selected.name}`);
+    return selected.device;
+  }
+
+  /** Select an LLM device, excluding any IDs if provided */
+  private async selectLlmDevice(excludeIds: Set<string>): Promise<ChatCompletionDevice | null> {
+    await this.findAllLlmDevices();
+
+    if (this.llmDevices.length === 0) return null;
+
+    let bestIndex = -1;
+    let bestScore = Infinity;
+
+    for (let i = 0; i < this.llmDevices.length; i++) {
+      const llm = this.llmDevices[i];
+      if (excludeIds.has(llm.id)) continue;
+      if (!llm.visionCapable) continue;
+      const score = llm.lastUsed + (llm.errorCount * 60000);
+      if (score < bestScore) {
+        bestScore = score;
+        bestIndex = i;
+      }
+    }
+
+    if (bestIndex === -1) return null;
+
+    const selected = this.llmDevices[bestIndex];
+    this.llmDevice = selected.device;
+    this.llmProviderType = selected.providerType;
+    selected.lastUsed = Date.now();
+
+    this.console.log(`[Discovery] Selected LLM: ${selected.name}`);
+    return selected.device;
+  }
+
+  private isRetryableLlmError(error: any): boolean {
+    const errorStr = String(error).toLowerCase();
+    return (
+      errorStr.includes('404') ||
+      errorStr.includes('not found') ||
+      errorStr.includes('no such model') ||
+      errorStr.includes('model not found') ||
+      errorStr.includes('endpoint')
+    );
+  }
+
+  /** Mark an LLM as having an error */
+  private markLlmError(device: ChatCompletionDevice): void {
+    const llm = this.llmDevices.find(l => l.device === device);
+    if (llm) {
+      llm.errorCount++;
+      this.console.log(`[Discovery] ${llm.name} error count: ${llm.errorCount}`);
+    }
   }
 
   /** Get camera snapshot as ImageData */
@@ -257,137 +457,195 @@ export class TopologyDiscoveryEngine {
       isValid: false,
     };
 
-    const llm = await this.findLlmDevice();
-    if (!llm?.getChatCompletion) {
-      analysis.error = 'No LLM device available';
-      return analysis;
-    }
-
     const imageData = await this.getCameraSnapshot(cameraId);
     if (!imageData) {
       analysis.error = 'Failed to capture camera snapshot';
       return analysis;
     }
 
-    // Try with detected provider format first, then fallback to alternates
-    // The order matters: try the most likely formats first
-    const formatsToTry: LlmProvider[] = [];
-
-    // Start with detected format
-    formatsToTry.push(this.llmProviderType);
-
-    // Add fallbacks based on detected provider
-    if (this.llmProviderType === 'openai') {
-      formatsToTry.push('scrypted', 'anthropic');
-    } else if (this.llmProviderType === 'anthropic') {
-      formatsToTry.push('scrypted', 'openai');
-    } else if (this.llmProviderType === 'scrypted') {
-      formatsToTry.push('anthropic', 'openai');
-    } else {
-      // Unknown - try all formats
-      formatsToTry.push('scrypted', 'anthropic', 'openai');
-    }
-
+    await this.findAllLlmDevices();
+    const excludeIds = new Set<string>();
     let lastError: any = null;
+    const maxAttempts = Math.max(1, this.llmDevices.length || 1);
 
-    for (const formatType of formatsToTry) {
-      try {
-        this.console.log(`[Discovery] Trying ${formatType} image format for ${cameraName}...`);
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const llm = await this.selectLlmDevice(excludeIds);
+      if (!llm?.getChatCompletion) {
+        analysis.error = 'No LLM device available';
+        return analysis;
+      }
+
+      let allFormatsVisionError = false;
+
+      // Try with detected provider format first, then fallback to alternates
+      // The order matters: try the most likely formats first
+      const formatsToTry: LlmProvider[] = [];
+
+      // Start with detected format
+      formatsToTry.push(this.llmProviderType);
+
+      // Add fallbacks based on detected provider
+      if (this.llmProviderType === 'openai') {
+        formatsToTry.push('scrypted', 'anthropic');
+      } else if (this.llmProviderType === 'anthropic') {
+        formatsToTry.push('scrypted', 'openai');
+      } else if (this.llmProviderType === 'scrypted') {
+        formatsToTry.push('anthropic', 'openai');
+      } else {
+        // Unknown - try all formats
+        formatsToTry.push('scrypted', 'anthropic', 'openai');
+      }
+
+      let visionFormatFailures = 0;
+      for (const formatType of formatsToTry) {
+        try {
+          this.console.log(`[Discovery] Trying ${formatType} image format for ${cameraName}...`);
+
+        // Build prompt with camera context (height)
+        const cameraNode = this.topology ? findCamera(this.topology, cameraId) : null;
+        const mountHeight = cameraNode?.context?.mountHeight || 8;
+        const cameraRange = (cameraNode?.fov as any)?.range || 80;
+
+        // Add camera-specific context to the prompt
+        const contextPrefix = `CAMERA INFORMATION:
+- Camera Name: ${cameraName}
+- Mount Height: ${mountHeight} feet above ground
+- Approximate viewing range: ${cameraRange} feet
+
+Use the mount height to help estimate distances - objects at ground level will appear at different angles depending on distance from a camera mounted at ${mountHeight} feet.
+
+`;
 
         // Build multimodal message with provider-specific image format
-        const result = await llm.getChatCompletion({
+          const result = await llm.getChatCompletion({
           messages: [
             {
               role: 'user',
               content: [
-                { type: 'text', text: SCENE_ANALYSIS_PROMPT },
+                { type: 'text', text: contextPrefix + SCENE_ANALYSIS_PROMPT },
                 buildImageContent(imageData, formatType),
               ],
             },
           ],
-          max_tokens: 1500,
+          max_tokens: 4000, // Increased for detailed scene analysis
           temperature: 0.3,
         });
 
-        const content = result?.choices?.[0]?.message?.content;
-        if (content && typeof content === 'string') {
-          try {
-            // Extract JSON from response (handle markdown code blocks)
-            let jsonStr = content.trim();
-            if (jsonStr.startsWith('```')) {
-              jsonStr = jsonStr.replace(/```json?\n?/g, '').replace(/```$/g, '').trim();
+          const content = result?.choices?.[0]?.message?.content;
+          if (content && typeof content === 'string') {
+            try {
+              // Extract JSON from response (handle markdown code blocks)
+              let jsonStr = content.trim();
+              if (jsonStr.startsWith('```')) {
+                jsonStr = jsonStr.replace(/```json?\n?/g, '').replace(/```$/g, '').trim();
+              }
+
+              // Try to recover truncated JSON
+              const parsed = this.parseJsonWithRecovery(jsonStr, cameraName);
+
+              // Map parsed data to our types
+              if (Array.isArray(parsed.landmarks)) {
+                analysis.landmarks = parsed.landmarks.map((l: any) => ({
+                  name: l.name || 'Unknown',
+                  type: this.mapLandmarkType(l.type),
+                  confidence: typeof l.confidence === 'number' ? l.confidence : 0.7,
+                  distance: this.mapDistance(l.distance),
+                  description: l.description || '',
+                  boundingBox: l.boundingBox,
+                }));
+              }
+
+              if (Array.isArray(parsed.zones)) {
+                analysis.zones = parsed.zones.map((z: any) => ({
+                  name: z.name || 'Unknown',
+                  type: this.mapZoneType(z.type),
+                  coverage: typeof z.coverage === 'number' ? z.coverage : 0.5,
+                  description: z.description || '',
+                  boundingBox: z.boundingBox,
+                  distance: this.mapDistance(z.distance), // Parse distance for zones too
+                } as DiscoveredZone & { distance?: DistanceEstimate }));
+              }
+
+              if (parsed.edges && typeof parsed.edges === 'object') {
+                analysis.edges = {
+                  top: parsed.edges.top || '',
+                  left: parsed.edges.left || '',
+                  right: parsed.edges.right || '',
+                  bottom: parsed.edges.bottom || '',
+                };
+              }
+
+              if (parsed.orientation) {
+                analysis.orientation = this.mapOrientation(parsed.orientation);
+              }
+
+              analysis.isValid = true;
+              this.console.log(`[Discovery] Analyzed ${cameraName}: ${analysis.landmarks.length} landmarks, ${analysis.zones.length} zones (using ${formatType} format)`);
+
+              // Update the preferred format for future requests
+              if (formatType !== this.llmProviderType) {
+                this.console.log(`[Discovery] Switching to ${formatType} format for future requests`);
+                this.llmProviderType = formatType;
+              }
+
+              // Success - exit the retry loop
+              return analysis;
+            } catch (parseError) {
+              this.console.warn(`[Discovery] Failed to parse LLM response for ${cameraName}:`, parseError);
+              analysis.error = 'Failed to parse LLM response';
+              return analysis;
             }
-
-            const parsed = JSON.parse(jsonStr);
-
-            // Map parsed data to our types
-            if (Array.isArray(parsed.landmarks)) {
-              analysis.landmarks = parsed.landmarks.map((l: any) => ({
-                name: l.name || 'Unknown',
-                type: this.mapLandmarkType(l.type),
-                confidence: typeof l.confidence === 'number' ? l.confidence : 0.7,
-                description: l.description || '',
-                boundingBox: l.boundingBox,
-              }));
-            }
-
-            if (Array.isArray(parsed.zones)) {
-              analysis.zones = parsed.zones.map((z: any) => ({
-                name: z.name || 'Unknown',
-                type: this.mapZoneType(z.type),
-                coverage: typeof z.coverage === 'number' ? z.coverage : 0.5,
-                description: z.description || '',
-                boundingBox: z.boundingBox,
-              }));
-            }
-
-            if (parsed.edges && typeof parsed.edges === 'object') {
-              analysis.edges = {
-                top: parsed.edges.top || '',
-                left: parsed.edges.left || '',
-                right: parsed.edges.right || '',
-                bottom: parsed.edges.bottom || '',
-              };
-            }
-
-            if (parsed.orientation) {
-              analysis.orientation = this.mapOrientation(parsed.orientation);
-            }
-
-            analysis.isValid = true;
-            this.console.log(`[Discovery] Analyzed ${cameraName}: ${analysis.landmarks.length} landmarks, ${analysis.zones.length} zones (using ${formatType} format)`);
-
-            // Update the preferred format for future requests
-            if (formatType !== this.llmProviderType) {
-              this.console.log(`[Discovery] Switching to ${formatType} format for future requests`);
-              this.llmProviderType = formatType;
-            }
-
-            // Success - exit the retry loop
-            return analysis;
-          } catch (parseError) {
-            this.console.warn(`[Discovery] Failed to parse LLM response for ${cameraName}:`, parseError);
-            analysis.error = 'Failed to parse LLM response';
-            return analysis;
           }
-        }
-      } catch (e) {
-        lastError = e;
+        } catch (e) {
+          lastError = e;
 
-        // Check if this is a vision/multimodal format error
-        if (isVisionFormatError(e)) {
-          this.console.warn(`[Discovery] ${formatType} format failed, trying fallback...`);
-          continue; // Try next format
-        }
+          // Check if this is a vision/multimodal format error
+          if (isVisionFormatError(e)) {
+            this.console.warn(`[Discovery] ${formatType} format failed, trying fallback...`);
+            visionFormatFailures++;
+            continue; // Try next format
+          }
 
-        // Not a format error - don't retry
-        this.console.warn(`[Discovery] Scene analysis failed for ${cameraName}:`, e);
-        break;
+          // Retry with a different LLM if error indicates bad endpoint/model
+          if (this.isRetryableLlmError(e)) {
+            this.console.warn(`[Discovery] LLM error for ${cameraName}, trying another provider...`);
+            this.markLlmError(llm);
+            const llmEntry = this.llmDevices.find(d => d.device === llm);
+            if (llmEntry) {
+              excludeIds.add(llmEntry.id);
+            }
+            break;
+          }
+
+          // Not a format error - don't retry
+          this.console.warn(`[Discovery] Scene analysis failed for ${cameraName}:`, e);
+          break;
+        }
+      }
+
+      allFormatsVisionError = visionFormatFailures > 0 && visionFormatFailures === formatsToTry.length;
+      if (allFormatsVisionError) {
+        const llmEntry = this.llmDevices.find(d => d.device === llm);
+        if (llmEntry) {
+          llmEntry.visionCapable = false;
+          excludeIds.add(llmEntry.id);
+          this.console.warn(`[Discovery] ${llmEntry.name} does not support vision. Excluding from discovery.`);
+        }
       }
     }
 
     // All formats failed
     if (lastError) {
+      // Track error for load balancing
+      // Note: llm may be null here if no device was available
+      if (lastError && !this.isRetryableLlmError(lastError)) {
+        // Best-effort error accounting for the most recent device
+        const lastDevice = this.llmDevice;
+        if (lastDevice) {
+          this.markLlmError(lastDevice);
+        }
+      }
+
       const errorStr = String(lastError);
       if (isVisionFormatError(lastError)) {
         analysis.error = 'Vision/image analysis failed with all formats. Ensure you have a vision-capable model (e.g., gpt-4o, gpt-4-turbo, claude-3-sonnet) configured and the @scrypted/llm plugin supports vision.';
@@ -447,6 +705,165 @@ export class TopologyDiscoveryEngine {
     return 'unknown';
   }
 
+  /** Map LLM distance to our type */
+  private mapDistance(distance: string): DistanceEstimate {
+    const dist = distance?.toLowerCase();
+    if (dist?.includes('close')) return 'close';
+    if (dist?.includes('near')) return 'near';
+    if (dist?.includes('medium')) return 'medium';
+    if (dist?.includes('far') && !dist?.includes('distant')) return 'far';
+    if (dist?.includes('distant')) return 'distant';
+    return 'medium'; // Default to medium if not specified
+  }
+
+  /** Get default distance in feet based on zone type */
+  private getDefaultZoneDistance(zoneType: string): number {
+    switch (zoneType) {
+      case 'patio':
+      case 'walkway':
+        return 10; // Close zones
+      case 'driveway':
+      case 'parking':
+        return 25; // Near zones
+      case 'yard':
+      case 'garden':
+      case 'pool':
+        return 40; // Medium zones
+      case 'street':
+        return 100; // Far zones
+      case 'unknown':
+      default:
+        return 50; // Default to medium distance
+    }
+  }
+
+  /** Try to parse JSON with recovery for truncated responses */
+  private parseJsonWithRecovery(jsonStr: string, context: string): any {
+    // First, try direct parse
+    try {
+      return JSON.parse(jsonStr);
+    } catch (e) {
+      // Log the raw response for debugging (first 500 chars)
+      this.console.log(`[Discovery] Raw LLM response for ${context} (first 500 chars): ${jsonStr.substring(0, 500)}...`);
+    }
+
+    // Try to recover truncated JSON by finding complete sections
+    try {
+      // Find where valid JSON might end (look for last complete object/array)
+      let recoveredJson = jsonStr;
+
+      // Try to close unclosed strings
+      const lastQuote = recoveredJson.lastIndexOf('"');
+      const lastColon = recoveredJson.lastIndexOf(':');
+      if (lastQuote > lastColon) {
+        // We might be in the middle of a string value
+        const beforeQuote = recoveredJson.substring(0, lastQuote);
+        const afterLastCompleteEntry = beforeQuote.lastIndexOf('},');
+        if (afterLastCompleteEntry > 0) {
+          recoveredJson = beforeQuote.substring(0, afterLastCompleteEntry + 1);
+        }
+      }
+
+      // Close any unclosed arrays/objects
+      let openBraces = (recoveredJson.match(/{/g) || []).length;
+      let closeBraces = (recoveredJson.match(/}/g) || []).length;
+      let openBrackets = (recoveredJson.match(/\[/g) || []).length;
+      let closeBrackets = (recoveredJson.match(/\]/g) || []).length;
+
+      // Add missing closing brackets/braces
+      while (closeBrackets < openBrackets) {
+        recoveredJson += ']';
+        closeBrackets++;
+      }
+      while (closeBraces < openBraces) {
+        recoveredJson += '}';
+        closeBraces++;
+      }
+
+      const recovered = JSON.parse(recoveredJson);
+      this.console.log(`[Discovery] Recovered truncated JSON for ${context}`);
+      return recovered;
+    } catch (recoveryError) {
+      // Last resort: try to extract just landmarks array
+      try {
+        const landmarksMatch = jsonStr.match(/"landmarks"\s*:\s*\[([\s\S]*?)(?:\]|$)/);
+        const zonesMatch = jsonStr.match(/"zones"\s*:\s*\[([\s\S]*?)(?:\]|$)/);
+
+        const result: any = { landmarks: [], zones: [], edges: {}, orientation: 'unknown' };
+
+        if (landmarksMatch) {
+          // Try to parse individual landmark objects
+          const landmarksStr = landmarksMatch[1];
+          const landmarkObjects = landmarksStr.match(/\{[^{}]*\}/g) || [];
+          result.landmarks = landmarkObjects.map((obj: string) => {
+            try {
+              return JSON.parse(obj);
+            } catch {
+              return null;
+            }
+          }).filter(Boolean);
+          this.console.log(`[Discovery] Extracted ${result.landmarks.length} landmarks from partial response for ${context}`);
+        }
+
+        if (zonesMatch) {
+          const zonesStr = zonesMatch[1];
+          const zoneObjects = zonesStr.match(/\{[^{}]*\}/g) || [];
+          result.zones = zoneObjects.map((obj: string) => {
+            try {
+              return JSON.parse(obj);
+            } catch {
+              return null;
+            }
+          }).filter(Boolean);
+          this.console.log(`[Discovery] Extracted ${result.zones.length} zones from partial response for ${context}`);
+        }
+
+        if (result.landmarks.length > 0 || result.zones.length > 0) {
+          return result;
+        }
+      } catch (extractError) {
+        // Give up
+      }
+
+      this.console.warn(`[Discovery] Could not recover JSON for ${context}`);
+      throw new Error(`Failed to parse LLM response: truncated or malformed JSON`);
+    }
+  }
+
+  /** Resolve a camera reference (name or deviceId) to its deviceId */
+  private resolveCameraRef(ref: string): string | null {
+    if (!this.topology?.cameras || !ref) return null;
+
+    // Try exact deviceId match first
+    const byId = this.topology.cameras.find(c => c.deviceId === ref);
+    if (byId) return byId.deviceId;
+
+    // Try exact name match
+    const byName = this.topology.cameras.find(c => c.name === ref);
+    if (byName) return byName.deviceId;
+
+    // Try case-insensitive name match
+    const refLower = ref.toLowerCase();
+    const byNameLower = this.topology.cameras.find(c => c.name.toLowerCase() === refLower);
+    if (byNameLower) return byNameLower.deviceId;
+
+    // Try partial name match (LLM might truncate or abbreviate)
+    const byPartial = this.topology.cameras.find(c =>
+      c.name.toLowerCase().includes(refLower) || refLower.includes(c.name.toLowerCase())
+    );
+    if (byPartial) return byPartial.deviceId;
+
+    this.console.warn(`[Discovery] Could not resolve camera reference: "${ref}"`);
+    return null;
+  }
+
+  /** Normalize camera references in an array to deviceIds */
+  private normalizeCameraRefs(refs: string[]): string[] {
+    return refs
+      .map(ref => this.resolveCameraRef(ref))
+      .filter((id): id is string => id !== null);
+  }
+
   /** Analyze all cameras and correlate findings */
   async runFullDiscovery(): Promise<TopologyCorrelation | null> {
     if (!this.topology?.cameras?.length) {
@@ -482,16 +899,20 @@ export class TopologyDiscoveryEngine {
         return null;
       }
 
-      // Correlate if we have multiple cameras
+      // ALWAYS generate suggestions from each camera's analysis first
+      // This ensures landmarks and zones from individual cameras are captured
+      for (const analysis of analyses) {
+        this.generateSuggestionsFromAnalysis(analysis);
+      }
+      this.console.log(`[Discovery] Generated suggestions from ${analyses.length} camera analyses`);
+
+      // Then correlate if we have multiple cameras (adds shared landmarks and connections)
       let correlation: TopologyCorrelation | null = null;
       if (analyses.length >= 2) {
         correlation = await this.correlateScenes(analyses);
         if (correlation) {
           this.generateSuggestionsFromCorrelation(correlation);
         }
-      } else if (analyses.length === 1) {
-        // Single camera - generate suggestions from its analysis
-        this.generateSuggestionsFromAnalysis(analyses[0]);
       }
 
       this.status.lastScanTime = Date.now();
@@ -552,24 +973,42 @@ export class TopologyDiscoveryEngine {
           };
 
           if (Array.isArray(parsed.sharedLandmarks)) {
-            correlation.sharedLandmarks = parsed.sharedLandmarks.map((l: any) => ({
-              name: l.name || 'Unknown',
-              type: this.mapLandmarkType(l.type),
-              seenByCameras: Array.isArray(l.seenByCameras) ? l.seenByCameras : [],
-              confidence: typeof l.confidence === 'number' ? l.confidence : 0.7,
-              description: l.description,
-            }));
+            correlation.sharedLandmarks = parsed.sharedLandmarks.map((l: any) => {
+              // Normalize camera references to deviceIds
+              const rawRefs = Array.isArray(l.seenByCameras) ? l.seenByCameras : [];
+              const normalizedRefs = this.normalizeCameraRefs(rawRefs);
+              if (rawRefs.length > 0 && normalizedRefs.length === 0) {
+                this.console.warn(`[Discovery] Landmark "${l.name}" has no resolvable camera refs: ${JSON.stringify(rawRefs)}`);
+              }
+              return {
+                name: l.name || 'Unknown',
+                type: this.mapLandmarkType(l.type),
+                seenByCameras: normalizedRefs,
+                confidence: typeof l.confidence === 'number' ? l.confidence : 0.7,
+                description: l.description,
+              };
+            });
           }
 
           if (Array.isArray(parsed.connections)) {
-            correlation.suggestedConnections = parsed.connections.map((c: any) => ({
-              fromCameraId: c.from || c.fromCameraId || '',
-              toCameraId: c.to || c.toCameraId || '',
-              transitSeconds: typeof c.transitSeconds === 'number' ? c.transitSeconds : 15,
-              via: c.via || '',
-              confidence: typeof c.confidence === 'number' ? c.confidence : 0.6,
-              bidirectional: c.bidirectional !== false,
-            }));
+            correlation.suggestedConnections = parsed.connections.map((c: any) => {
+              // Normalize camera references to deviceIds
+              const fromRef = c.from || c.fromCameraId || '';
+              const toRef = c.to || c.toCameraId || '';
+              const fromId = this.resolveCameraRef(fromRef);
+              const toId = this.resolveCameraRef(toRef);
+              if (!fromId || !toId) {
+                this.console.warn(`[Discovery] Connection has unresolvable camera refs: from="${fromRef}" to="${toRef}"`);
+              }
+              return {
+                fromCameraId: fromId || fromRef,
+                toCameraId: toId || toRef,
+                transitSeconds: typeof c.transitSeconds === 'number' ? c.transitSeconds : 15,
+                via: c.via || '',
+                confidence: typeof c.confidence === 'number' ? c.confidence : 0.6,
+                bidirectional: c.bidirectional !== false,
+              };
+            });
           }
 
           this.console.log(`[Discovery] Correlation found ${correlation.sharedLandmarks.length} shared landmarks, ${correlation.suggestedConnections.length} connections`);
@@ -590,9 +1029,14 @@ export class TopologyDiscoveryEngine {
   private generateSuggestionsFromAnalysis(analysis: SceneAnalysis): void {
     if (!analysis.isValid) return;
 
+    this.console.log(`[Discovery] Generating suggestions from ${analysis.landmarks.length} landmarks, ${analysis.zones.length} zones`);
+
     // Generate landmark suggestions
     for (const landmark of analysis.landmarks) {
       if (landmark.confidence >= this.config.minLandmarkConfidence) {
+        // Calculate distance in feet from distance estimate
+        const distanceFeet = landmark.distance ? distanceToFeet(landmark.distance) : 50;
+
         const suggestion: DiscoverySuggestion = {
           id: `landmark_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
           type: 'landmark',
@@ -605,25 +1049,39 @@ export class TopologyDiscoveryEngine {
             type: landmark.type,
             description: landmark.description,
             visibleFromCameras: [analysis.cameraId],
-          },
+            // Include extra metadata for positioning
+            boundingBox: landmark.boundingBox,
+            distance: landmark.distance,
+            distanceFeet: distanceFeet,
+          } as any, // Extra metadata not in base Landmark interface
         };
         this.suggestions.set(suggestion.id, suggestion);
+        this.console.log(`[Discovery] Landmark suggestion: ${landmark.name} (${landmark.type}, ${landmark.distance || 'medium'}, ~${distanceFeet}ft)`);
       }
     }
 
-    // Generate zone suggestions
+    // Generate zone suggestions (even for smaller coverage - 10% is enough)
     for (const zone of analysis.zones) {
-      if (zone.coverage >= 0.2) {
+      if (zone.coverage >= 0.1) {
+        // Calculate distance in feet from distance estimate (for zones with distance info)
+        const zoneWithDist = zone as DiscoveredZone & { distance?: DistanceEstimate };
+        const distanceFeet = zoneWithDist.distance ? distanceToFeet(zoneWithDist.distance) : this.getDefaultZoneDistance(zone.type);
+
         const suggestion: DiscoverySuggestion = {
           id: `zone_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
           type: 'zone',
           timestamp: Date.now(),
           sourceCameras: [analysis.cameraId],
-          confidence: 0.7,
+          confidence: Math.min(0.9, 0.5 + zone.coverage), // Higher coverage = higher confidence
           status: 'pending',
-          zone: zone,
+          zone: {
+            ...zone,
+            // Include distance metadata for positioning
+            distanceFeet: distanceFeet,
+          } as any,
         };
         this.suggestions.set(suggestion.id, suggestion);
+        this.console.log(`[Discovery] Zone suggestion: ${zone.name} (${zone.type}, ${Math.round(zone.coverage * 100)}% coverage, ~${distanceFeet}ft)`);
       }
     }
   }

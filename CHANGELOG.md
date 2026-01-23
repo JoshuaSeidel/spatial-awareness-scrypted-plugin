@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.34 - 2026-01-23
+
+### Added
+- Settings display for LLMs excluded from discovery due to lack of vision support.
+
 ## 0.6.33 - 2026-01-23
 
 ### Added
