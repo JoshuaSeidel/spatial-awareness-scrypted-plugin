@@ -21,6 +21,8 @@ export class TrackingState {
   private changeCallbacks: StateChangeCallback[] = [];
   private storage: Storage;
   private console: Console;
+  private persistTimer: NodeJS.Timeout | null = null;
+  private readonly persistDebounceMs: number = 2000;
 
   constructor(storage: Storage, console: Console) {
     this.storage = storage;
@@ -60,7 +62,7 @@ export class TrackingState {
 
     this.objects.set(object.globalId, object);
     this.notifyChange();
-    this.persistState();
+    this.schedulePersist();
   }
 
   /** Add a new sighting to an existing tracked object */
@@ -77,7 +79,7 @@ export class TrackingState {
     this.objectsByCamera.get(sighting.cameraId)!.add(globalId);
 
     this.notifyChange();
-    this.persistState();
+    this.schedulePersist();
     return true;
   }
 
@@ -96,7 +98,7 @@ export class TrackingState {
     this.objectsByCamera.get(segment.toCameraId)!.add(globalId);
 
     this.notifyChange();
-    this.persistState();
+    this.schedulePersist();
     return true;
   }
 
@@ -150,7 +152,7 @@ export class TrackingState {
       }
 
       this.notifyChange();
-      this.persistState();
+      this.schedulePersist();
     }
   }
 
@@ -167,7 +169,7 @@ export class TrackingState {
       }
 
       this.notifyChange();
-      this.persistState();
+      this.schedulePersist();
     }
   }
 
@@ -227,6 +229,17 @@ export class TrackingState {
     } catch (e) {
       this.console.error('Failed to persist tracking state:', e);
     }
+  }
+
+  private schedulePersist(): void {
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+    }
+
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      this.persistState();
+    }, this.persistDebounceMs);
   }
 
   private loadPersistedState(): void {

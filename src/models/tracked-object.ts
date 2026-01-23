@@ -3,7 +3,7 @@
  * Defines objects being tracked across multiple cameras
  */
 
-import { ObjectDetectionResult } from '@scrypted/sdk';
+import type { ObjectDetectionResult } from '@scrypted/sdk';
 
 /** Unique identifier for a globally tracked object */
 export type GlobalTrackingId = string;

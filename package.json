@@ -1,6 +1,6 @@
 {
   "name": "@blueharford/scrypted-spatial-awareness",
-  "version": "0.6.3",
+  "version": "0.6.33",
   "description": "Cross-camera object tracking for Scrypted NVR with spatial awareness",
   "author": "Joshua Seidel <blueharford>",
   "license": "Apache-2.0",
@@ -24,7 +24,8 @@
     "scrypted-debug": "node node_modules/@scrypted/sdk/bin/scrypted-debug.js",
     "scrypted-deploy": "node node_modules/@scrypted/sdk/bin/scrypted-deploy.js",
     "scrypted-readme": "node node_modules/@scrypted/sdk/bin/scrypted-readme.js",
-    "scrypted-package-json": "node node_modules/@scrypted/sdk/bin/scrypted-package-json.js"
+    "scrypted-package-json": "node node_modules/@scrypted/sdk/bin/scrypted-package-json.js",
+    "test": "node -r ts-node/register/transpile-only ./tests/run-tests.ts"
   },
   "keywords": [
     "scrypted",
@@ -54,6 +55,7 @@
   "devDependencies": {
     "@scrypted/common": "^1.0.0",
     "@types/node": "^20.11.0",
+    "ts-node": "^10.9.2",
     "typescript": "^5.3.0"
   }
 }

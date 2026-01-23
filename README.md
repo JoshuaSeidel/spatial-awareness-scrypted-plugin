@@ -134,10 +134,13 @@ With proper landmarks, alerts become rich and contextual:
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Correlation Window | 30s | Max time for cross-camera matching |
-| Correlation Threshold | 0.6 | Min confidence for auto-correlation |
+| Correlation Threshold | 0.35 | Min confidence for auto-correlation |
 | Loitering Threshold | 3s | Time before triggering alerts |
+| Minimum Detection Confidence | 0.5 | Ignore detections below this score |
 | Per-Object Cooldown | 30s | Min time between alerts for same object |
-| LLM Rate Limit | 10s | Min time between LLM API calls |
+| Notify on Alert Updates | Off | Send notifications when an existing alert updates |
+| Alert Update Cooldown | 60s | Min time between update notifications |
+| LLM Rate Limit | 5s | Min time between LLM API calls |
 
 ### Alert Types
 

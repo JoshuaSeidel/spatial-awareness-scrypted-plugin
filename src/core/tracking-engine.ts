@@ -61,8 +61,12 @@ export interface TrackingEngineConfig {
   loiteringThreshold: number;
   /** Per-object alert cooldown (ms) */
   objectAlertCooldown: number;
+  /** Minimum detection score to consider */
+  minDetectionScore: number;
   /** Use LLM for enhanced descriptions */
   useLlmDescriptions: boolean;
+  /** Specific LLM device IDs to use (if not set, auto-discovers all for load balancing) */
+  llmDeviceIds?: string[];
   /** LLM rate limit interval (ms) - minimum time between LLM calls */
   llmDebounceInterval?: number;
   /** Whether to fall back to basic notifications when LLM is unavailable or slow */
@@ -110,7 +114,9 @@ export class TrackingEngine {
   private spatialReasoning: SpatialReasoningEngine;
   private listeners: Map<string, EventListenerRegister> = new Map();
   private pendingTimers: Map<GlobalTrackingId, NodeJS.Timeout> = new Map();
+  private loiteringTimers: Map<GlobalTrackingId, NodeJS.Timeout> = new Map();
   private lostCheckInterval: NodeJS.Timeout | null = null;
+  private cleanupInterval: NodeJS.Timeout | null = null;
   /** Track last alert time per object to enforce cooldown */
   private objectLastAlertTime: Map<GlobalTrackingId, number> = new Map();
   /** Callback for topology changes (e.g., landmark suggestions) */
@@ -138,6 +144,12 @@ export class TrackingEngine {
   /** Callback for training status updates */
   private onTrainingStatusUpdate?: (status: TrainingStatusUpdate) => void;
 
+  // ==================== Snapshot Cache ====================
+  /** Cached snapshots for tracked objects (for faster notifications) */
+  private snapshotCache: Map<GlobalTrackingId, MediaObject> = new Map();
+  /** Pending LLM description promises (started when snapshot is captured) */
+  private pendingDescriptions: Map<GlobalTrackingId, Promise<SpatialReasoningResult>> = new Map();
+
   constructor(
     topology: CameraTopology,
     state: TrackingState,
@@ -155,6 +167,7 @@ export class TrackingEngine {
     // Initialize spatial reasoning engine
     const spatialConfig: SpatialReasoningConfig = {
       enableLlm: config.useLlmDescriptions,
+      llmDeviceIds: config.llmDeviceIds,
       enableLandmarkLearning: config.enableLandmarkLearning ?? true,
       landmarkConfidenceThreshold: config.landmarkConfidenceThreshold ?? 0.7,
       contextCacheTtl: 60000, // 1 minute cache
@@ -206,6 +219,10 @@ export class TrackingEngine {
       this.checkForLostObjects();
     }, 30000); // Check every 30 seconds
 
+    this.cleanupInterval = setInterval(() => {
+      this.state.cleanup();
+    }, 300000); // Cleanup every 5 minutes
+
     this.console.log(`Tracking engine started with ${this.listeners.size} cameras`);
   }
 
@@ -227,10 +244,20 @@ export class TrackingEngine {
     }
     this.pendingTimers.clear();
 
+    for (const timer of this.loiteringTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.loiteringTimers.clear();
+
     // Stop lost check interval
     if (this.lostCheckInterval) {
       clearInterval(this.lostCheckInterval);
       this.lostCheckInterval = null;
+    }
+
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
     }
 
     this.console.log('Tracking engine stopped');
@@ -255,7 +282,7 @@ export class TrackingEngine {
 
     for (const detection of detected.detections) {
       // Skip low-confidence detections
-      if (detection.score < 0.5) continue;
+      if (detection.score < this.config.minDetectionScore) continue;
 
       // If in training mode, record trainer detections
       if (this.isTrainingActive() && detection.className === 'person') {
@@ -318,6 +345,25 @@ export class TrackingEngine {
     this.lastLlmCallTime = Date.now();
   }
 
+  /** Check and record LLM call - returns false if rate limited */
+  private tryLlmCall(silent: boolean = false): boolean {
+    if (!this.isLlmCallAllowed()) {
+      // Only log once per rate limit window, not every call
+      if (!silent && !this.rateLimitLogged) {
+        const remaining = Math.ceil((this.config.llmDebounceInterval || 30000) - (Date.now() - this.lastLlmCallTime)) / 1000;
+        this.console.log(`[LLM] Rate limited, ${remaining.toFixed(0)}s until next call allowed`);
+        this.rateLimitLogged = true;
+      }
+      return false;
+    }
+    this.rateLimitLogged = false;
+    this.recordLlmCall();
+    return true;
+  }
+
+  /** Track if we've already logged rate limit message */
+  private rateLimitLogged: boolean = false;
+
   /** Get spatial reasoning result for movement (uses RAG + LLM) with debouncing and fallback */
   private async getSpatialDescription(
     tracked: TrackedObject,
@@ -330,23 +376,27 @@ export class TrackingEngine {
     const fallbackTimeout = this.config.llmFallbackTimeout ?? 3000;
 
     try {
+      if (!this.config.useLlmDescriptions) {
+        return this.spatialReasoning.generateMovementDescription(
+          tracked,
+          fromCameraId,
+          toCameraId,
+          transitTime
+        );
+      }
+
       // Check rate limiting - if not allowed, return null to use basic description
-      if (!this.isLlmCallAllowed()) {
-        this.console.log('LLM rate-limited, using basic notification');
+      if (!this.tryLlmCall()) {
+        this.console.log('[Movement] LLM rate-limited, using basic notification');
         return null;
       }
 
       // Get snapshot from camera for LLM analysis (if LLM is enabled)
       let mediaObject: MediaObject | undefined;
-      if (this.config.useLlmDescriptions) {
-        const camera = systemManager.getDeviceById<Camera>(currentCameraId);
-        if (camera?.interfaces?.includes(ScryptedInterface.Camera)) {
-          mediaObject = await camera.takePicture();
-        }
+      const camera = systemManager.getDeviceById<Camera>(currentCameraId);
+      if (camera?.interfaces?.includes(ScryptedInterface.Camera)) {
+        mediaObject = await camera.takePicture();
       }
-
-      // Record that we're making an LLM call
-      this.recordLlmCall();
 
       // Use spatial reasoning engine for rich context-aware description
       // Apply timeout if fallback is enabled
@@ -435,7 +485,16 @@ export class TrackingEngine {
       // Check if this is a cross-camera transition
       const lastSighting = getLastSighting(tracked);
       if (lastSighting && lastSighting.cameraId !== sighting.cameraId) {
+        // Cancel any pending loitering alert if object already transitioned
+        this.clearLoiteringTimer(tracked.globalId);
         const transitDuration = sighting.timestamp - lastSighting.timestamp;
+
+        // Update cached snapshot from new camera (object is now visible here)
+        if (this.config.useLlmDescriptions) {
+          this.captureAndCacheSnapshot(tracked.globalId, sighting.cameraId).catch(e => {
+            this.console.warn(`[Transition Snapshot] Failed to update snapshot: ${e}`);
+          });
+        }
 
         // Add journey segment
         this.state.addJourney(tracked.globalId, {
@@ -459,33 +518,57 @@ export class TrackingEngine {
         );
 
         // Check loitering threshold and per-object cooldown before alerting
-        if (this.passesLoiteringThreshold(tracked) && !this.isInAlertCooldown(tracked.globalId)) {
-          // Get spatial reasoning result with RAG context
-          const spatialResult = await this.getSpatialDescription(
-            tracked,
-            lastSighting.cameraId,
-            sighting.cameraId,
-            transitDuration,
-            sighting.cameraId
-          );
+        if (this.passesLoiteringThreshold(tracked)) {
+          if (this.isInAlertCooldown(tracked.globalId)) {
+            const spatialResult = await this.spatialReasoning.generateMovementDescription(
+              tracked,
+              lastSighting.cameraId,
+              sighting.cameraId,
+              transitDuration
+            );
 
-          // Generate movement alert for cross-camera transition
-          await this.alertManager.checkAndAlert('movement', tracked, {
-            fromCameraId: lastSighting.cameraId,
-            fromCameraName: lastSighting.cameraName,
-            toCameraId: sighting.cameraId,
-            toCameraName: sighting.cameraName,
-            transitTime: transitDuration,
-            objectClass: sighting.detection.className,
-            objectLabel: spatialResult?.description || sighting.detection.label,
-            detectionId: sighting.detectionId,
-            // Include spatial context for enriched alerts
-            pathDescription: spatialResult?.pathDescription,
-            involvedLandmarks: spatialResult?.involvedLandmarks?.map(l => l.name),
-            usedLlm: spatialResult?.usedLlm,
-          });
+            await this.alertManager.updateMovementAlert(tracked, {
+              fromCameraId: lastSighting.cameraId,
+              fromCameraName: lastSighting.cameraName,
+              toCameraId: sighting.cameraId,
+              toCameraName: sighting.cameraName,
+              transitTime: transitDuration,
+              objectClass: sighting.detection.className,
+              objectLabel: spatialResult.description || sighting.detection.label,
+              detectionId: sighting.detectionId,
+              pathDescription: spatialResult.pathDescription,
+              involvedLandmarks: spatialResult.involvedLandmarks?.map(l => l.name),
+              usedLlm: spatialResult.usedLlm,
+            });
+          } else {
+            // Get spatial reasoning result with RAG context
+            const spatialResult = await this.getSpatialDescription(
+              tracked,
+              lastSighting.cameraId,
+              sighting.cameraId,
+              transitDuration,
+              sighting.cameraId
+            );
 
-          this.recordAlertTime(tracked.globalId);
+            // Generate movement alert for cross-camera transition
+            const mediaObject = this.snapshotCache.get(tracked.globalId);
+            await this.alertManager.checkAndAlert('movement', tracked, {
+              fromCameraId: lastSighting.cameraId,
+              fromCameraName: lastSighting.cameraName,
+              toCameraId: sighting.cameraId,
+              toCameraName: sighting.cameraName,
+              transitTime: transitDuration,
+              objectClass: sighting.detection.className,
+              objectLabel: spatialResult?.description || sighting.detection.label,
+              detectionId: sighting.detectionId,
+              // Include spatial context for enriched alerts
+              pathDescription: spatialResult?.pathDescription,
+              involvedLandmarks: spatialResult?.involvedLandmarks?.map(l => l.name),
+              usedLlm: spatialResult?.usedLlm,
+            }, mediaObject);
+
+            this.recordAlertTime(tracked.globalId);
+          }
         }
       }
 
@@ -528,49 +611,146 @@ export class TrackingEngine {
     sighting: ObjectSighting,
     isEntryPoint: boolean
   ): void {
+    // Capture snapshot IMMEDIATELY when object is first detected (don't wait for loitering threshold)
+    // This ensures we have a good image while the person/object is still in frame
+    if (this.config.useLlmDescriptions) {
+      this.captureAndCacheSnapshot(globalId, sighting.cameraId).catch(e => {
+        this.console.warn(`[Snapshot] Failed to cache initial snapshot: ${e}`);
+      });
+    }
+
     // Check after loitering threshold if object is still being tracked
-    setTimeout(async () => {
-      const tracked = this.state.getObject(globalId);
-      if (!tracked || tracked.state !== 'active') return;
+    const existing = this.loiteringTimers.get(globalId);
+    if (existing) {
+      clearTimeout(existing);
+      this.loiteringTimers.delete(globalId);
+    }
 
-      // Check if we've already alerted for this object
-      if (this.isInAlertCooldown(globalId)) return;
+    const timer = setTimeout(async () => {
+      try {
+        const tracked = this.state.getObject(globalId);
+        if (!tracked || tracked.state !== 'active') return;
 
-      // Generate spatial description
-      const spatialResult = this.spatialReasoning.generateEntryDescription(
-        tracked,
-        sighting.cameraId
-      );
+        const lastSighting = getLastSighting(tracked);
+        if (!lastSighting || lastSighting.cameraId !== sighting.cameraId) {
+          return;
+        }
 
-      if (isEntryPoint) {
-        // Entry point - generate property entry alert
-        await this.alertManager.checkAndAlert('property_entry', tracked, {
-          cameraId: sighting.cameraId,
-          cameraName: sighting.cameraName,
-          objectClass: sighting.detection.className,
-          objectLabel: spatialResult.description,
-          detectionId: sighting.detectionId,
-          involvedLandmarks: spatialResult.involvedLandmarks?.map(l => l.name),
-          usedLlm: spatialResult.usedLlm,
-        });
-      } else {
-        // Non-entry point - still alert about activity using movement alert type
-        // This notifies about any activity around the property using topology context
-        await this.alertManager.checkAndAlert('movement', tracked, {
-          cameraId: sighting.cameraId,
-          cameraName: sighting.cameraName,
-          toCameraId: sighting.cameraId,
-          toCameraName: sighting.cameraName,
-          objectClass: sighting.detection.className,
-          objectLabel: spatialResult.description, // Use spatial reasoning description (topology-based)
-          detectionId: sighting.detectionId,
-          involvedLandmarks: spatialResult.involvedLandmarks?.map(l => l.name),
-          usedLlm: spatialResult.usedLlm,
-        });
+        const maxStaleMs = Math.max(10000, this.config.loiteringThreshold * 2);
+        if (Date.now() - lastSighting.timestamp > maxStaleMs) {
+          return;
+        }
+
+        // Check if we've already alerted for this object
+        if (this.isInAlertCooldown(globalId)) {
+          const spatialResult = await this.spatialReasoning.generateEntryDescription(tracked, sighting.cameraId);
+          await this.alertManager.updateMovementAlert(tracked, {
+            cameraId: sighting.cameraId,
+            cameraName: sighting.cameraName,
+            toCameraId: sighting.cameraId,
+            toCameraName: sighting.cameraName,
+            objectClass: sighting.detection.className,
+            objectLabel: spatialResult.description,
+            detectionId: sighting.detectionId,
+            involvedLandmarks: spatialResult.involvedLandmarks?.map(l => l.name),
+            usedLlm: spatialResult.usedLlm,
+          });
+          return;
+        }
+
+      // Use prefetched LLM result if available (started when snapshot was captured)
+      let spatialResult: SpatialReasoningResult;
+      const pendingDescription = this.pendingDescriptions.get(globalId);
+
+        if (pendingDescription) {
+        this.console.log(`[Entry Alert] Using prefetched LLM result for ${globalId.slice(0, 8)}`);
+        try {
+          spatialResult = await pendingDescription;
+          this.console.log(`[Entry Alert] Prefetch result: "${spatialResult.description.substring(0, 60)}...", usedLlm=${spatialResult.usedLlm}`);
+        } catch (e) {
+          this.console.warn(`[Entry Alert] Prefetch failed, using basic description: ${e}`);
+          // Don't make another LLM call - use basic description (no mediaObject = no LLM)
+          spatialResult = await this.spatialReasoning.generateEntryDescription(tracked, sighting.cameraId);
+        }
+        this.pendingDescriptions.delete(globalId);
+        } else {
+        // No prefetch available - only call LLM if rate limit allows
+        if (this.tryLlmCall()) {
+          this.console.log(`[Entry Alert] No prefetch, generating with LLM`);
+          const mediaObject = this.snapshotCache.get(globalId);
+          spatialResult = await this.spatialReasoning.generateEntryDescription(tracked, sighting.cameraId, mediaObject);
+          this.console.log(`[Entry Alert] Got description: "${spatialResult.description.substring(0, 60)}...", usedLlm=${spatialResult.usedLlm}`);
+        } else {
+          // Rate limited - use basic description (no LLM)
+          this.console.log(`[Entry Alert] Rate limited, using basic description`);
+          spatialResult = await this.spatialReasoning.generateEntryDescription(tracked, sighting.cameraId);
+        }
       }
 
-      this.recordAlertTime(globalId);
+      // Always use movement alert type for smart notifications with LLM descriptions
+      // The property_entry/property_exit types are legacy and disabled by default
+        const mediaObject = this.snapshotCache.get(globalId);
+        await this.alertManager.checkAndAlert('movement', tracked, {
+        cameraId: sighting.cameraId,
+        cameraName: sighting.cameraName,
+        toCameraId: sighting.cameraId,
+        toCameraName: sighting.cameraName,
+        objectClass: sighting.detection.className,
+        objectLabel: spatialResult.description, // Smart LLM-generated description
+        detectionId: sighting.detectionId,
+        involvedLandmarks: spatialResult.involvedLandmarks?.map(l => l.name),
+        usedLlm: spatialResult.usedLlm,
+        }, mediaObject);
+
+        this.recordAlertTime(globalId);
+      } finally {
+        this.loiteringTimers.delete(globalId);
+      }
     }, this.config.loiteringThreshold);
+
+    this.loiteringTimers.set(globalId, timer);
+  }
+
+  /** Capture and cache a snapshot for a tracked object, and start LLM analysis immediately */
+  private async captureAndCacheSnapshot(
+    globalId: GlobalTrackingId,
+    cameraId: string,
+    eventType: 'entry' | 'exit' | 'movement' = 'entry'
+  ): Promise<void> {
+    // Skip if we already have a recent snapshot for this object (within 5 seconds)
+    const existingSnapshot = this.snapshotCache.get(globalId);
+    if (existingSnapshot && eventType !== 'exit') {
+      // For entry/movement, we can reuse existing snapshot
+      // For exit, we want a fresh snapshot while they're still visible
+      return;
+    }
+
+    try {
+      const camera = systemManager.getDeviceById<Camera>(cameraId);
+      if (camera?.interfaces?.includes(ScryptedInterface.Camera)) {
+        const mediaObject = await camera.takePicture();
+        if (mediaObject) {
+          this.snapshotCache.set(globalId, mediaObject);
+
+          // Start LLM analysis immediately in parallel (don't await) - but respect rate limits
+          const tracked = this.state.getObject(globalId);
+          if (tracked && this.config.useLlmDescriptions && this.tryLlmCall()) {
+            const descriptionPromise = eventType === 'exit'
+              ? this.spatialReasoning.generateExitDescription(tracked, cameraId, mediaObject)
+              : this.spatialReasoning.generateEntryDescription(tracked, cameraId, mediaObject);
+
+            this.pendingDescriptions.set(globalId, descriptionPromise);
+
+            // Log when complete (but don't spam logs)
+            descriptionPromise.catch(e => {
+              this.console.warn(`[LLM Prefetch] Failed for ${globalId.slice(0, 8)}: ${e}`);
+            });
+          }
+        }
+      }
+    } catch (e) {
+      this.console.warn(`[Snapshot] Failed to capture snapshot: ${e}`);
+    }
   }
 
   /** Attempt to correlate a sighting with existing tracked objects */
@@ -620,30 +800,70 @@ export class TrackingEngine {
     // Mark as pending and set timer
     this.state.markPending(tracked.globalId);
 
+    // Cancel any pending loitering alert
+    this.clearLoiteringTimer(tracked.globalId);
+
+    // Capture a fresh snapshot now while object is still visible (before they leave)
+    // Also starts LLM analysis immediately in parallel
+    if (this.config.useLlmDescriptions) {
+      this.captureAndCacheSnapshot(tracked.globalId, sighting.cameraId, 'exit').catch(e => {
+        this.console.warn(`[Exit Snapshot] Failed to update snapshot: ${e}`);
+      });
+    }
+
     // Wait for correlation window before marking as exited
     const timer = setTimeout(async () => {
       const current = this.state.getObject(tracked.globalId);
       if (current && current.state === 'pending') {
         this.state.markExited(tracked.globalId, sighting.cameraId, sighting.cameraName);
 
-        // Generate rich exit description using topology context
-        const spatialResult = this.spatialReasoning.generateExitDescription(
-          current,
-          sighting.cameraId
-        );
+        // Use prefetched LLM result if available (started when exit was first detected)
+        let spatialResult: SpatialReasoningResult;
+        const pendingDescription = this.pendingDescriptions.get(tracked.globalId);
 
-        this.console.log(
-          `Object ${tracked.globalId.slice(0, 8)} exited: ${spatialResult.description}`
-        );
+        if (pendingDescription) {
+          this.console.log(`[Exit Alert] Using prefetched LLM result for ${tracked.globalId.slice(0, 8)}`);
+          try {
+            spatialResult = await pendingDescription;
+            this.console.log(`[Exit Alert] Prefetch result: "${spatialResult.description.substring(0, 60)}...", usedLlm=${spatialResult.usedLlm}`);
+          } catch (e) {
+            this.console.warn(`[Exit Alert] Prefetch failed, using basic description: ${e}`);
+            // Don't make another LLM call - use basic description
+            spatialResult = await this.spatialReasoning.generateExitDescription(current, sighting.cameraId);
+          }
+          this.pendingDescriptions.delete(tracked.globalId);
+        } else {
+          // No prefetch available - only call LLM if rate limit allows
+          if (this.tryLlmCall()) {
+            this.console.log(`[Exit Alert] No prefetch, generating with LLM`);
+            const mediaObject = this.snapshotCache.get(tracked.globalId);
+            spatialResult = await this.spatialReasoning.generateExitDescription(current, sighting.cameraId, mediaObject);
+            this.console.log(`[Exit Alert] Got description: "${spatialResult.description.substring(0, 60)}...", usedLlm=${spatialResult.usedLlm}`);
+          } else {
+            // Rate limited - use basic description (no LLM)
+            this.console.log(`[Exit Alert] Rate limited, using basic description`);
+            spatialResult = await this.spatialReasoning.generateExitDescription(current, sighting.cameraId);
+          }
+        }
 
-        await this.alertManager.checkAndAlert('property_exit', current, {
+        // Use movement alert for exit too - smart notifications with LLM descriptions
+        const mediaObject = this.snapshotCache.get(tracked.globalId);
+        await this.alertManager.checkAndAlert('movement', current, {
           cameraId: sighting.cameraId,
           cameraName: sighting.cameraName,
+          toCameraId: sighting.cameraId,
+          toCameraName: sighting.cameraName,
           objectClass: current.className,
           objectLabel: spatialResult.description,
           involvedLandmarks: spatialResult.involvedLandmarks?.map(l => l.name),
           usedLlm: spatialResult.usedLlm,
-        });
+        }, mediaObject);
+
+        this.alertManager.clearActiveAlertsForObject(tracked.globalId);
+
+        // Clean up cached snapshot and pending descriptions after exit alert
+        this.snapshotCache.delete(tracked.globalId);
+        this.pendingDescriptions.delete(tracked.globalId);
       }
       this.pendingTimers.delete(tracked.globalId);
     }, this.config.correlationWindow);
@@ -661,16 +881,32 @@ export class TrackingEngine {
 
       if (timeSinceSeen > this.config.lostTimeout) {
         this.state.markLost(tracked.globalId);
+        this.clearLoiteringTimer(tracked.globalId);
         this.console.log(
           `Object ${tracked.globalId.slice(0, 8)} marked as lost ` +
           `(not seen for ${Math.round(timeSinceSeen / 1000)}s)`
         );
 
+        // Clean up cached snapshot and pending descriptions
+        this.snapshotCache.delete(tracked.globalId);
+        this.pendingDescriptions.delete(tracked.globalId);
+
         this.alertManager.checkAndAlert('lost_tracking', tracked, {
           objectClass: tracked.className,
           objectLabel: tracked.label,
         });
+
+        this.alertManager.clearActiveAlertsForObject(tracked.globalId);
       }
+    }
+  }
+
+  /** Clear a pending loitering timer if present */
+  private clearLoiteringTimer(globalId: GlobalTrackingId): void {
+    const timer = this.loiteringTimers.get(globalId);
+    if (timer) {
+      clearTimeout(timer);
+      this.loiteringTimers.delete(globalId);
     }
   }
 

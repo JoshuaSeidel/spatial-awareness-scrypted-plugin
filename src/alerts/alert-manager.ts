@@ -3,7 +3,7 @@
  * Generates and dispatches alerts based on tracking events
  */
 
-import sdk, { Notifier, Camera, ScryptedInterface, MediaObject } from '@scrypted/sdk';
+import type { Notifier, Camera, MediaObject } from '@scrypted/sdk';
 import {
   Alert,
   AlertRule,
@@ -12,15 +12,31 @@ import {
   AlertCondition,
   createAlert,
   createDefaultRules,
+  generateAlertMessage,
 } from '../models/alert';
 import { TrackedObject, GlobalTrackingId } from '../models/tracked-object';
+import {
+  getActiveAlertKey,
+  hasMeaningfulAlertChange,
+  shouldSendUpdateNotification,
+} from './alert-utils';
 
-const { systemManager, mediaManager } = sdk;
+let sdkModule: typeof import('@scrypted/sdk') | null = null;
+const getSdk = async () => {
+  if (!sdkModule) {
+    sdkModule = await import('@scrypted/sdk');
+  }
+  return sdkModule;
+};
 
 export class AlertManager {
   private rules: AlertRule[] = [];
   private recentAlerts: Alert[] = [];
   private cooldowns: Map<string, number> = new Map();
+  private activeAlerts: Map<string, { alert: Alert; lastUpdate: number; lastNotified: number }> = new Map();
+  private readonly activeAlertTtlMs: number = 10 * 60 * 1000;
+  private notifyOnUpdates: boolean = false;
+  private updateNotificationCooldownMs: number = 60000;
   private console: Console;
   private storage: Storage;
   private maxAlerts: number = 100;
@@ -37,7 +53,8 @@ export class AlertManager {
   async checkAndAlert(
     type: AlertType,
     tracked: TrackedObject,
-    details: Partial<AlertDetails>
+    details: Partial<AlertDetails>,
+    mediaObjectOverride?: MediaObject
   ): Promise<Alert | null> {
     // Find matching rule
     const rule = this.rules.find(r => r.type === type && r.enabled);
@@ -57,23 +74,30 @@ export class AlertManager {
       }
     }
 
-    // Check cooldown
+    // Check conditions
+    if (!this.evaluateConditions(rule.conditions, tracked)) {
+      return null;
+    }
+
+    // Update existing movement alert if active (prevents alert spam)
+    if (type === 'movement') {
+      const updated = await this.updateActiveAlert(type, rule.id, tracked, details);
+      if (updated) return updated;
+    }
+
+    // Check cooldown (only for new alerts)
     const cooldownKey = `${rule.id}:${tracked.globalId}`;
     const lastAlert = this.cooldowns.get(cooldownKey) || 0;
     if (rule.cooldown > 0 && Date.now() - lastAlert < rule.cooldown) {
       return null;
     }
 
-    // Check conditions
-    if (!this.evaluateConditions(rule.conditions, tracked)) {
-      return null;
-    }
-
     // Create alert
+    // Note: details.objectLabel may contain LLM-generated description - preserve it if provided
     const fullDetails: AlertDetails = {
       ...details,
       objectClass: tracked.className,
-      objectLabel: tracked.label,
+      objectLabel: details.objectLabel || tracked.label,
     };
 
     const alert = createAlert(
@@ -90,36 +114,84 @@ export class AlertManager {
       this.recentAlerts.pop();
     }
 
+    if (type === 'movement') {
+      const key = getActiveAlertKey(type, rule.id, tracked.globalId);
+      this.activeAlerts.set(key, { alert, lastUpdate: Date.now(), lastNotified: alert.timestamp });
+    }
+
     // Update cooldown
     this.cooldowns.set(cooldownKey, Date.now());
 
     // Send notifications
-    await this.sendNotifications(alert, rule);
+    await this.sendNotifications(alert, rule, mediaObjectOverride);
 
     this.console.log(`Alert generated: [${alert.severity}] ${alert.message}`);
 
     return alert;
   }
 
+  async updateMovementAlert(
+    tracked: TrackedObject,
+    details: Partial<AlertDetails>
+  ): Promise<Alert | null> {
+    const rule = this.rules.find(r => r.type === 'movement' && r.enabled);
+    if (!rule) return null;
+
+    if (rule.objectClasses && rule.objectClasses.length > 0) {
+      if (!rule.objectClasses.includes(tracked.className)) {
+        return null;
+      }
+    }
+
+    if (rule.cameraIds && rule.cameraIds.length > 0 && details.cameraId) {
+      if (!rule.cameraIds.includes(details.cameraId)) {
+        return null;
+      }
+    }
+
+    if (!this.evaluateConditions(rule.conditions, tracked)) {
+      return null;
+    }
+
+    return this.updateActiveAlert('movement', rule.id, tracked, details);
+  }
+
   /**
    * Send notifications for an alert
    */
-  private async sendNotifications(alert: Alert, rule: AlertRule): Promise<void> {
+  private async sendNotifications(
+    alert: Alert,
+    rule: AlertRule,
+    mediaObjectOverride?: MediaObject
+  ): Promise<void> {
+    const sdkModule = await getSdk();
+    const { ScryptedInterface } = sdkModule;
+    const { systemManager } = sdkModule.default;
     const notifierIds = rule.notifiers.length > 0
       ? rule.notifiers
       : this.getDefaultNotifiers();
 
+    // Debug: log which notifiers we're using
+    this.console.log(`[Notification] Rule ${rule.id} has ${rule.notifiers.length} notifiers, using ${notifierIds.length} notifier(s): ${notifierIds.join(', ') || 'NONE'}`);
+
+    if (notifierIds.length === 0) {
+      this.console.warn(`[Notification] No notifiers configured! Configure a notifier in plugin settings.`);
+      return;
+    }
+
     // Try to get a thumbnail from the camera
-    let mediaObject: MediaObject | undefined;
-    const cameraId = alert.details.toCameraId || alert.details.cameraId;
-    if (cameraId) {
-      try {
-        const camera = systemManager.getDeviceById<Camera>(cameraId);
-        if (camera && camera.interfaces?.includes(ScryptedInterface.Camera)) {
-          mediaObject = await camera.takePicture();
+    let mediaObject: MediaObject | undefined = mediaObjectOverride;
+    if (!mediaObject) {
+      const cameraId = alert.details.toCameraId || alert.details.cameraId;
+      if (cameraId) {
+        try {
+          const camera = systemManager.getDeviceById<Camera>(cameraId);
+          if (camera && camera.interfaces?.includes(ScryptedInterface.Camera)) {
+            mediaObject = await camera.takePicture();
+          }
+        } catch (e) {
+          this.console.warn(`Failed to get thumbnail from camera ${cameraId}:`, e);
         }
-      } catch (e) {
-        this.console.warn(`Failed to get thumbnail from camera ${cameraId}:`, e);
       }
     }
 
@@ -152,8 +224,74 @@ export class AlertManager {
     }
   }
 
+  clearActiveAlertsForObject(globalId: GlobalTrackingId): void {
+    for (const [key, entry] of this.activeAlerts.entries()) {
+      if (entry.alert.trackedObjectId === globalId) {
+        this.activeAlerts.delete(key);
+      }
+    }
+  }
+
+  setUpdateNotificationOptions(enabled: boolean, cooldownMs: number): void {
+    this.notifyOnUpdates = enabled;
+    this.updateNotificationCooldownMs = Math.max(0, cooldownMs);
+  }
+
+  private async updateActiveAlert(
+    type: AlertType,
+    ruleId: string,
+    tracked: TrackedObject,
+    details: Partial<AlertDetails>
+  ): Promise<Alert | null> {
+    const key = getActiveAlertKey(type, ruleId, tracked.globalId);
+    const existing = this.activeAlerts.get(key);
+    if (!existing) return null;
+
+    const now = Date.now();
+    if (now - existing.lastUpdate > this.activeAlertTtlMs) {
+      this.activeAlerts.delete(key);
+      return null;
+    }
+
+    const updatedDetails: AlertDetails = {
+      ...existing.alert.details,
+      ...details,
+      objectClass: tracked.className,
+      objectLabel: details.objectLabel || tracked.label,
+    };
+
+    const shouldUpdate = hasMeaningfulAlertChange(existing.alert.details, updatedDetails);
+    if (!shouldUpdate) return existing.alert;
+
+    existing.alert.details = updatedDetails;
+    existing.alert.message = generateAlertMessage(type, updatedDetails);
+    existing.alert.timestamp = now;
+    existing.lastUpdate = now;
+
+    const idx = this.recentAlerts.findIndex(a => a.id === existing.alert.id);
+    if (idx >= 0) {
+      this.recentAlerts.splice(idx, 1);
+    }
+    this.recentAlerts.unshift(existing.alert);
+    if (this.recentAlerts.length > this.maxAlerts) {
+      this.recentAlerts.pop();
+    }
+
+    if (this.notifyOnUpdates) {
+      const rule = this.rules.find(r => r.id === ruleId);
+      if (rule && shouldSendUpdateNotification(this.notifyOnUpdates, existing.lastNotified, now, this.updateNotificationCooldownMs)) {
+        existing.lastNotified = now;
+        await this.sendNotifications(existing.alert, rule);
+      }
+    }
+
+    return existing.alert;
+  }
+
+
   /**
    * Get notification title based on alert type
+   * For movement alerts with LLM descriptions, use the smart description as title
    */
   private getNotificationTitle(alert: Alert): string {
     const prefix = alert.severity === 'critical' ? '🚨 ' :
@@ -166,11 +304,26 @@ export class AlertManager {
 
     switch (alert.type) {
       case 'property_entry':
+        // Legacy - use simple title
         return `${prefix}${objectType} Arrived`;
       case 'property_exit':
+        // Legacy - use simple title
         return `${prefix}${objectType} Left`;
       case 'movement':
-        // Include destination in title
+        // For smart activity alerts, use the LLM description as title if available
+        // This gives us rich context like "Person walking toward front door"
+        if (alert.details.objectLabel && alert.details.usedLlm) {
+          // Truncate to reasonable title length (first sentence or 60 chars)
+          let smartTitle = alert.details.objectLabel;
+          const firstPeriod = smartTitle.indexOf('.');
+          if (firstPeriod > 0 && firstPeriod < 60) {
+            smartTitle = smartTitle.substring(0, firstPeriod);
+          } else if (smartTitle.length > 60) {
+            smartTitle = smartTitle.substring(0, 57) + '...';
+          }
+          return `${prefix}${smartTitle}`;
+        }
+        // Fallback: include destination in title
         const dest = alert.details.toCameraName || 'area';
         return `${prefix}${objectType} → ${dest}`;
       case 'unusual_path':
@@ -195,25 +348,33 @@ export class AlertManager {
     try {
       // Try new multiple notifiers setting first
       const notifiers = this.storage.getItem('defaultNotifiers');
+      this.console.log(`[Notifiers] Raw storage value: ${notifiers}`);
+
       if (notifiers) {
         // Could be JSON array or comma-separated string
         try {
           const parsed = JSON.parse(notifiers);
           if (Array.isArray(parsed)) {
+            this.console.log(`[Notifiers] Parsed JSON array: ${parsed.join(', ')}`);
             return parsed;
           }
         } catch {
           // Not JSON, might be comma-separated or single value
           if (notifiers.includes(',')) {
-            return notifiers.split(',').map(s => s.trim()).filter(Boolean);
+            const result = notifiers.split(',').map(s => s.trim()).filter(Boolean);
+            this.console.log(`[Notifiers] Parsed comma-separated: ${result.join(', ')}`);
+            return result;
           }
+          this.console.log(`[Notifiers] Single value: ${notifiers}`);
           return [notifiers];
         }
       }
       // Fallback to old single notifier setting
       const defaultNotifier = this.storage.getItem('defaultNotifier');
+      this.console.log(`[Notifiers] Fallback single notifier: ${defaultNotifier || 'NONE'}`);
       return defaultNotifier ? [defaultNotifier] : [];
-    } catch {
+    } catch (e) {
+      this.console.error(`[Notifiers] Error reading notifiers:`, e);
       return [];
     }
   }

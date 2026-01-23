@@ -111,11 +111,32 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       description: 'Object must be visible for this duration before triggering movement alerts',
       group: 'Tracking',
     },
+    minDetectionScore: {
+      title: 'Minimum Detection Confidence',
+      type: 'number',
+      defaultValue: 0.5,
+      description: 'Minimum detection score (0-1) to consider for tracking',
+      group: 'Tracking',
+    },
     objectAlertCooldown: {
       title: 'Per-Object Alert Cooldown (seconds)',
       type: 'number',
       defaultValue: 30,
       description: 'Minimum time between alerts for the same tracked object',
+      group: 'Tracking',
+    },
+    notifyOnAlertUpdates: {
+      title: 'Notify on Alert Updates',
+      type: 'boolean',
+      defaultValue: false,
+      description: 'Send notifications when an existing alert is updated (camera transitions, context changes)',
+      group: 'Tracking',
+    },
+    alertUpdateCooldown: {
+      title: 'Alert Update Cooldown (seconds)',
+      type: 'number',
+      defaultValue: 60,
+      description: 'Minimum time between update notifications for the same tracked object (0 = no limit)',
       group: 'Tracking',
     },
 
@@ -130,8 +151,8 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
     llmDebounceInterval: {
       title: 'LLM Rate Limit (seconds)',
       type: 'number',
-      defaultValue: 10,
-      description: 'Minimum time between LLM calls to prevent API overload (0 = no limit)',
+      defaultValue: 5,
+      description: 'Minimum time between LLM calls to prevent API rate limiting. Increase if you get rate limit errors. (0 = no limit)',
       group: 'AI & Spatial Reasoning',
     },
     llmFallbackEnabled: {
@@ -237,20 +258,22 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       group: 'MQTT Integration',
     },
 
-    // Alert Settings
-    enableAlerts: {
-      title: 'Enable Alerts',
-      type: 'boolean',
-      defaultValue: true,
-      group: 'Alerts',
+    // Integrations
+    llmProviders: {
+      title: 'LLM Providers',
+      type: 'device',
+      multiple: true,
+      deviceFilter: `interfaces.includes('ChatCompletion')`,
+      description: 'Select which LLM providers to use (e.g., OpenAI, Claude, Ollama). Multiple providers will be load-balanced to avoid rate limits.',
+      group: 'Integrations',
     },
     defaultNotifiers: {
-      title: 'Notifiers',
+      title: 'Notification Service',
       type: 'device',
       multiple: true,
       deviceFilter: `interfaces.includes('${ScryptedInterface.Notifier}')`,
-      description: 'Select one or more notifiers to receive alerts',
-      group: 'Alerts',
+      description: 'Select one or more notifiers to receive alerts (e.g., Pushover, Home Assistant)',
+      group: 'Integrations',
     },
 
     // Tracked Cameras
@@ -261,13 +284,6 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       deviceFilter: `interfaces.includes('${ScryptedInterface.ObjectDetector}')`,
       group: 'Cameras',
       description: 'Select cameras with object detection to track',
-    },
-
-    // Alert Rules (stored as JSON)
-    alertRules: {
-      title: 'Alert Rules',
-      type: 'string',
-      hide: true,
     },
   });
 
@@ -326,6 +342,8 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       await this.initializeMqtt();
     }
 
+    this.applyAlertUpdateSettings();
+
     this.console.log('Spatial Awareness Plugin initialized');
   }
 
@@ -361,20 +379,22 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
     }
 
     const config: TrackingEngineConfig = {
-      correlationWindow: (this.storageSettings.values.correlationWindow as number || 30) * 1000,
-      correlationThreshold: this.storageSettings.values.correlationThreshold as number || 0.35,
-      lostTimeout: (this.storageSettings.values.lostTimeout as number || 300) * 1000,
+      correlationWindow: this.getNumberSetting(this.storageSettings.values.correlationWindow, 30) * 1000,
+      correlationThreshold: this.getNumberSetting(this.storageSettings.values.correlationThreshold, 0.35),
+      lostTimeout: this.getNumberSetting(this.storageSettings.values.lostTimeout, 300) * 1000,
       useVisualMatching: this.storageSettings.values.useVisualMatching as boolean ?? true,
-      loiteringThreshold: (this.storageSettings.values.loiteringThreshold as number || 3) * 1000,
-      objectAlertCooldown: (this.storageSettings.values.objectAlertCooldown as number || 30) * 1000,
+      loiteringThreshold: this.getNumberSetting(this.storageSettings.values.loiteringThreshold, 3) * 1000,
+      minDetectionScore: this.getNumberSetting(this.storageSettings.values.minDetectionScore, 0.5),
+      objectAlertCooldown: this.getNumberSetting(this.storageSettings.values.objectAlertCooldown, 30) * 1000,
       useLlmDescriptions: this.storageSettings.values.useLlmDescriptions as boolean ?? true,
-      llmDebounceInterval: (this.storageSettings.values.llmDebounceInterval as number || 10) * 1000,
+      llmDeviceIds: this.parseLlmProviders(),
+      llmDebounceInterval: this.getNumberSetting(this.storageSettings.values.llmDebounceInterval, 5) * 1000,
       llmFallbackEnabled: this.storageSettings.values.llmFallbackEnabled as boolean ?? true,
-      llmFallbackTimeout: (this.storageSettings.values.llmFallbackTimeout as number || 3) * 1000,
+      llmFallbackTimeout: this.getNumberSetting(this.storageSettings.values.llmFallbackTimeout, 3) * 1000,
       enableTransitTimeLearning: this.storageSettings.values.enableTransitTimeLearning as boolean ?? true,
       enableConnectionSuggestions: this.storageSettings.values.enableConnectionSuggestions as boolean ?? true,
       enableLandmarkLearning: this.storageSettings.values.enableLandmarkLearning as boolean ?? true,
-      landmarkConfidenceThreshold: this.storageSettings.values.landmarkConfidenceThreshold as number ?? 0.7,
+      landmarkConfidenceThreshold: this.getNumberSetting(this.storageSettings.values.landmarkConfidenceThreshold, 0.7),
     };
 
     this.trackingEngine = new TrackingEngine(
@@ -384,6 +404,8 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       config,
       this.console
     );
+
+    this.applyAlertUpdateSettings();
 
     // Set up callback to save topology changes (e.g., from accepted landmark suggestions)
     this.trackingEngine.setTopologyChangeCallback((updatedTopology) => {
@@ -400,10 +422,10 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
 
   private async initializeDiscoveryEngine(topology: CameraTopology): Promise<void> {
     const discoveryConfig: DiscoveryConfig = {
-      discoveryIntervalHours: this.storageSettings.values.discoveryIntervalHours as number ?? 0,
-      autoAcceptThreshold: this.storageSettings.values.autoAcceptThreshold as number ?? 0.85,
-      minLandmarkConfidence: this.storageSettings.values.minLandmarkConfidence as number ?? 0.6,
-      minConnectionConfidence: this.storageSettings.values.minConnectionConfidence as number ?? 0.5,
+      discoveryIntervalHours: this.getNumberSetting(this.storageSettings.values.discoveryIntervalHours, 0),
+      autoAcceptThreshold: this.getNumberSetting(this.storageSettings.values.autoAcceptThreshold, 0.85),
+      minLandmarkConfidence: this.getNumberSetting(this.storageSettings.values.minLandmarkConfidence, 0.6),
+      minConnectionConfidence: this.getNumberSetting(this.storageSettings.values.minConnectionConfidence, 0.5),
     };
 
     if (this.discoveryEngine) {
@@ -420,6 +442,42 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
         this.discoveryEngine.startPeriodicDiscovery();
       }
     }
+  }
+
+  /** Parse LLM providers from settings - handles both array and single value formats */
+  private parseLlmProviders(): string[] | undefined {
+    const value = this.storageSettings.values.llmProviders;
+    if (!value) return undefined;
+
+    // Handle array format
+    if (Array.isArray(value)) {
+      const filtered = value.filter(Boolean);
+      return filtered.length > 0 ? filtered : undefined;
+    }
+
+    // Handle JSON string format
+    if (typeof value === 'string') {
+      try {
+        const parsed = JSON.parse(value);
+        if (Array.isArray(parsed)) {
+          const filtered = parsed.filter(Boolean);
+          return filtered.length > 0 ? filtered : undefined;
+        }
+        // Single device ID string
+        return value ? [value] : undefined;
+      } catch {
+        // Not JSON, treat as single device ID
+        return value ? [value] : undefined;
+      }
+    }
+
+    return undefined;
+  }
+
+  private getNumberSetting(value: unknown, fallback: number): number {
+    if (value === undefined || value === null) return fallback;
+    const num = typeof value === 'string' ? Number(value) : (value as number);
+    return Number.isFinite(num) ? num : fallback;
   }
 
   // ==================== DeviceProvider Implementation ====================
@@ -697,93 +755,19 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
     // ==================== 5. Tracking ====================
     addGroup('Tracking');
 
-    // ==================== 6. AI & Spatial Reasoning ====================
+    // ==================== 6. Integrations ====================
+    addGroup('Integrations');
+
+    // ==================== 7. AI & Spatial Reasoning ====================
     addGroup('AI & Spatial Reasoning');
 
-    // ==================== 7. Auto-Topology Discovery ====================
+    // ==================== 8. Auto-Topology Discovery ====================
     addGroup('Auto-Topology Discovery');
-
-    // ==================== 8. Alerts ====================
-    addGroup('Alerts');
-
-    // Add alert rules configuration UI
-    const alertRules = this.alertManager.getRules();
-    const rulesHtml = this.generateAlertRulesHtml(alertRules);
-    settings.push({
-      key: 'alertRulesEditor',
-      title: 'Alert Rules',
-      type: 'html' as any,
-      value: rulesHtml,
-      group: 'Alerts',
-    });
 
     // ==================== 9. MQTT Integration ====================
     addGroup('MQTT Integration');
 
     return settings;
-  }
-
-  private generateAlertRulesHtml(rules: any[]): string {
-    const ruleRows = rules.map(rule => `
-      <tr data-rule-id="${rule.id}">
-        <td style="padding:8px;border-bottom:1px solid #333;">
-          <input type="checkbox" ${rule.enabled ? 'checked' : ''}
-                 onchange="(function(el){var rules=JSON.parse(localStorage.getItem('sa-temp-rules')||'[]');var r=rules.find(x=>x.id==='${rule.id}');if(r)r.enabled=el.checked;localStorage.setItem('sa-temp-rules',JSON.stringify(rules));})(this)" />
-        </td>
-        <td style="padding:8px;border-bottom:1px solid #333;color:#fff;">${rule.name}</td>
-        <td style="padding:8px;border-bottom:1px solid #333;color:#888;">${rule.type}</td>
-        <td style="padding:8px;border-bottom:1px solid #333;">
-          <span style="padding:2px 8px;border-radius:4px;font-size:12px;background:${
-            rule.severity === 'critical' ? '#e94560' :
-            rule.severity === 'warning' ? '#f39c12' : '#3498db'
-          };color:white;">${rule.severity}</span>
-        </td>
-        <td style="padding:8px;border-bottom:1px solid #333;color:#888;">${Math.round(rule.cooldown / 1000)}s</td>
-      </tr>
-    `).join('');
-
-    const initCode = `localStorage.setItem('sa-temp-rules',JSON.stringify(${JSON.stringify(rules)}))`;
-    const saveCode = `(function(){var rules=JSON.parse(localStorage.getItem('sa-temp-rules')||'[]');fetch('/endpoint/@blueharford/scrypted-spatial-awareness/api/alert-rules',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(rules)}).then(r=>r.json()).then(d=>{if(d.success)alert('Alert rules saved!');else alert('Error: '+d.error);}).catch(e=>alert('Error: '+e));})()`;
-
-    return `
-      <style>
-        .sa-rules-table { width:100%; border-collapse:collapse; margin-top:10px; }
-        .sa-rules-table th { text-align:left; padding:10px 8px; border-bottom:2px solid #e94560; color:#e94560; font-size:13px; }
-        .sa-save-rules-btn {
-          background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%);
-          color: white;
-          border: none;
-          padding: 10px 20px;
-          border-radius: 6px;
-          font-size: 14px;
-          font-weight: 600;
-          cursor: pointer;
-          margin-top: 15px;
-        }
-        .sa-save-rules-btn:hover { opacity: 0.9; }
-        .sa-rules-container { background:#16213e; border-radius:8px; padding:15px; }
-        .sa-rules-desc { color:#888; font-size:13px; margin-bottom:10px; }
-      </style>
-      <div class="sa-rules-container">
-        <p class="sa-rules-desc">Enable or disable alert types. Movement alerts notify you when someone moves between cameras.</p>
-        <table class="sa-rules-table">
-          <thead>
-            <tr>
-              <th style="width:40px;">On</th>
-              <th>Alert Type</th>
-              <th>Event</th>
-              <th>Severity</th>
-              <th>Cooldown</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${ruleRows}
-          </tbody>
-        </table>
-        <button class="sa-save-rules-btn" onclick="${saveCode}">Save Alert Rules</button>
-        <script>(function(){${initCode}})();</script>
-      </div>
-    `;
   }
 
   async putSetting(key: string, value: SettingValue): Promise<void> {
@@ -802,6 +786,7 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       key === 'llmDebounceInterval' ||
       key === 'llmFallbackEnabled' ||
       key === 'llmFallbackTimeout' ||
+      key === 'llmProviders' ||
       key === 'enableTransitTimeLearning' ||
       key === 'enableConnectionSuggestions' ||
       key === 'enableLandmarkLearning' ||
@@ -818,6 +803,10 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       }
     }
 
+    if (key === 'notifyOnAlertUpdates' || key === 'alertUpdateCooldown') {
+      this.applyAlertUpdateSettings();
+    }
+
     // Handle MQTT setting changes
     if (key === 'enableMqtt' || key === 'mqttBroker' || key === 'mqttUsername' ||
         key === 'mqttPassword' || key === 'mqttBaseTopic') {
@@ -829,6 +818,12 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
         await this.initializeMqtt();
       }
     }
+  }
+
+  private applyAlertUpdateSettings(): void {
+    const enabled = this.storageSettings.values.notifyOnAlertUpdates as boolean ?? false;
+    const cooldownSeconds = this.getNumberSetting(this.storageSettings.values.alertUpdateCooldown, 60);
+    this.alertManager.setUpdateNotificationOptions(enabled, cooldownSeconds * 1000);
   }
 
   // ==================== HttpRequestHandler Implementation ====================
@@ -1062,18 +1057,24 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
     if (request.method === 'GET') {
       const topologyJson = this.storage.getItem('topology');
       const topology = topologyJson ? JSON.parse(topologyJson) : createEmptyTopology();
+      this.console.log(`[Topology API] GET - drawnZones: ${topology.drawnZones?.length || 0}`);
       response.send(JSON.stringify(topology), {
         headers: { 'Content-Type': 'application/json' },
       });
     } else if (request.method === 'PUT' || request.method === 'POST') {
       try {
         const topology = JSON.parse(request.body!) as CameraTopology;
+        this.console.log(`[Topology API] PUT received - drawnZones: ${topology.drawnZones?.length || 0}`);
+        if (topology.drawnZones?.length) {
+          this.console.log(`[Topology API] Zone names: ${topology.drawnZones.map(z => z.name).join(', ')}`);
+        }
         this.storage.setItem('topology', JSON.stringify(topology));
         await this.startTrackingEngine(topology);
         response.send(JSON.stringify({ success: true }), {
           headers: { 'Content-Type': 'application/json' },
         });
       } catch (e) {
+        this.console.error(`[Topology API] PUT error:`, e);
         response.send(JSON.stringify({ error: 'Invalid topology JSON' }), {
           code: 400,
           headers: { 'Content-Type': 'application/json' },
@@ -1584,7 +1585,7 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
     }
   }
 
-  private handleTrainingEndRequest(response: HttpResponse): void {
+  private async handleTrainingEndRequest(response: HttpResponse): Promise<void> {
     if (!this.trackingEngine) {
       response.send(JSON.stringify({ error: 'Tracking engine not running' }), {
         code: 500,
@@ -1595,6 +1596,44 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
 
     const session = this.trackingEngine.endTrainingSession();
     if (session) {
+      // Get unique visited cameras
+      const visitedCameraIds = [...new Set(session.visits.map(v => v.cameraId))];
+
+      // Auto-run discovery on visited cameras to detect landmarks and zones
+      if (this.discoveryEngine && visitedCameraIds.length > 0) {
+        this.console.log(`[Training] Running discovery analysis on ${visitedCameraIds.length} visited cameras...`);
+
+        let landmarksFound = 0;
+        let zonesFound = 0;
+
+        for (const cameraId of visitedCameraIds) {
+          try {
+            const analysis = await this.discoveryEngine.analyzeScene(cameraId);
+            if (analysis.isValid) {
+              landmarksFound += analysis.landmarks.length;
+              zonesFound += analysis.zones.length;
+              this.console.log(`[Training] ${cameraId}: Found ${analysis.landmarks.length} landmarks, ${analysis.zones.length} zones`);
+            }
+          } catch (e) {
+            this.console.warn(`[Training] Failed to analyze ${cameraId}:`, e);
+          }
+        }
+
+        // Get all pending suggestions and auto-accept them
+        const suggestions = this.discoveryEngine.getPendingSuggestions();
+        for (const suggestion of suggestions) {
+          this.applyDiscoverySuggestion(suggestion);
+          this.discoveryEngine.acceptSuggestion(suggestion.id);
+        }
+
+        // Persist topology after applying suggestions
+        if (suggestions.length > 0 && this.trackingEngine) {
+          const updatedTopology = this.trackingEngine.getTopology();
+          await this.storageSettings.putSetting('topology', JSON.stringify(updatedTopology));
+          this.console.log(`[Training] Auto-applied ${suggestions.length} discoveries (${landmarksFound} landmarks, ${zonesFound} zones)`);
+        }
+      }
+
       response.send(JSON.stringify(session), {
         headers: { 'Content-Type': 'application/json' },
       });
@@ -1829,21 +1868,29 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       if (!position || (position.x === 0 && position.y === 0)) {
         // Debug logging
         this.console.log(`[Discovery] Processing landmark "${suggestion.landmark.name}"`);
+        this.console.log(`[Discovery] sourceCameras: ${JSON.stringify(suggestion.sourceCameras)}`);
         this.console.log(`[Discovery] visibleFromCameras: ${JSON.stringify(suggestion.landmark.visibleFromCameras)}`);
         this.console.log(`[Discovery] Available cameras: ${topology.cameras.map(c => `${c.name}(${c.deviceId})`).join(', ')}`);
 
-        // Find a camera that can see this landmark - use flexible matching (deviceId, name, or case-insensitive)
+        // Find a camera that can see this landmark
+        // PREFER sourceCameras (set from analysis.cameraId) over visibleFromCameras (from LLM parsing)
+        const sourceCameraRef = suggestion.sourceCameras?.[0];
         const visibleCameraRef = suggestion.landmark.visibleFromCameras?.[0];
-        const camera = visibleCameraRef ? topology.cameras.find(c =>
-          c.deviceId === visibleCameraRef ||
-          c.name === visibleCameraRef ||
-          c.name.toLowerCase() === visibleCameraRef.toLowerCase()
+        const cameraRef = sourceCameraRef || visibleCameraRef;
+
+        // Use flexible matching (deviceId, name, or case-insensitive)
+        const camera = cameraRef ? topology.cameras.find(c =>
+          c.deviceId === cameraRef ||
+          c.name === cameraRef ||
+          c.name.toLowerCase() === cameraRef.toLowerCase()
         ) : null;
 
         if (camera) {
-          this.console.log(`[Discovery] Matched camera: ${camera.name}, position: ${JSON.stringify(camera.floorPlanPosition)}, fov: ${JSON.stringify(camera.fov)}`);
+          this.console.log(`[Discovery] Matched camera: ${camera.name} (${camera.deviceId})`);
+          this.console.log(`[Discovery] Camera position: ${JSON.stringify(camera.floorPlanPosition)}`);
+          this.console.log(`[Discovery] Camera FOV: ${JSON.stringify(camera.fov)}`);
         } else {
-          this.console.warn(`[Discovery] No camera matched for "${visibleCameraRef}"`);
+          this.console.warn(`[Discovery] No camera matched for ref="${cameraRef}" (source="${sourceCameraRef}", visible="${visibleCameraRef}")`);
         }
 
         if (camera?.floorPlanPosition) {
@@ -1853,31 +1900,54 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
           const range = fov.range || 80;
           const fovAngle = fov.angle || 90;
 
-          // Count existing landmarks from this camera to spread them out
-          const cameraDeviceId = camera.deviceId;
-          const existingFromCamera = (topology.landmarks || []).filter(l =>
-            l.visibleFromCameras?.includes(cameraDeviceId) ||
-            l.visibleFromCameras?.includes(camera.name)
-          ).length;
-
           // Calculate position in front of camera within its FOV
           // Convert direction to radians (0 = up/north, 90 = right/east)
           const dirRad = (direction - 90) * Math.PI / 180;
           const halfFov = (fovAngle / 2) * Math.PI / 180;
 
-          // Spread landmarks across the FOV cone at varying distances
-          const angleOffset = (existingFromCamera % 3 - 1) * halfFov * 0.6; // -0.6, 0, +0.6 of half FOV
-          const distanceMultiplier = 0.5 + (existingFromCamera % 2) * 0.3; // 50% or 80% of range
+          // Get floor plan scale (pixels per foot) - default 5
+          const floorPlanScale = topology.floorPlanScale || 5;
+
+          // Use the ACTUAL distance from LLM analysis (distanceFeet) - this is the key fix!
+          // The LLM estimates distance based on object size, perspective, and camera context
+          const landmarkData = suggestion.landmark as any;
+          const distanceFeet = landmarkData.distanceFeet || 50; // Default 50ft if not set
+          const distanceInPixels = distanceFeet * floorPlanScale;
+
+          // Debug: log the distance data to verify it's being used correctly
+          this.console.log(`[Discovery] Landmark "${suggestion.landmark.name}" distance data: distanceFeet=${distanceFeet}, distance="${landmarkData.distance || 'not set'}", floorPlanScale=${floorPlanScale}, distanceInPixels=${distanceInPixels}`);
+
+          // Use bounding box for horizontal positioning within the FOV
+          const bbox = landmarkData.boundingBox as [number, number, number, number] | undefined;
+
+          let angleOffset: number;
+
+          if (bbox && bbox.length >= 2) {
+            // Use bounding box X for horizontal position in FOV
+            const bboxCenterX = bbox[0] + (bbox[2] || 0) / 2; // 0 = left edge, 1 = right edge
+            // Map X position to angle within FOV
+            angleOffset = (bboxCenterX - 0.5) * 2 * halfFov;
+            this.console.log(`[Discovery] Using bounding box [${bbox.join(',')}] for horizontal angle offset`);
+          } else {
+            // No bounding box - spread horizontally based on existing landmarks
+            const cameraDeviceId = camera.deviceId;
+            const existingFromCamera = (topology.landmarks || []).filter(l =>
+              l.visibleFromCameras?.includes(cameraDeviceId) ||
+              l.visibleFromCameras?.includes(camera.name)
+            ).length;
+            // Spread horizontally across FOV
+            angleOffset = (existingFromCamera % 3 - 1) * halfFov * 0.6;
+            this.console.log(`[Discovery] No bounding box, spreading horizontally (existing: ${existingFromCamera})`);
+          }
 
           const finalAngle = dirRad + angleOffset;
-          const distance = range * distanceMultiplier;
 
           position = {
-            x: camera.floorPlanPosition.x + Math.cos(finalAngle) * distance,
-            y: camera.floorPlanPosition.y + Math.sin(finalAngle) * distance,
+            x: camera.floorPlanPosition.x + Math.cos(finalAngle) * distanceInPixels,
+            y: camera.floorPlanPosition.y + Math.sin(finalAngle) * distanceInPixels,
           };
 
-          this.console.log(`[Discovery] Placing landmark "${suggestion.landmark.name}" in ${camera.name}'s FOV: dir=${direction}°, dist=${distance.toFixed(0)}px`);
+          this.console.log(`[Discovery] Placing landmark "${suggestion.landmark.name}" at ${distanceFeet}ft (${distanceInPixels}px) from ${camera.name}: dir=${direction}°, angle=${(angleOffset * 180 / Math.PI).toFixed(1)}°`);
         } else {
           // Position in a grid pattern starting from center
           const landmarkCount = topology.landmarks?.length || 0;
@@ -1917,61 +1987,110 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
 
       // Find cameras that see this zone
       const sourceCameras = suggestion.sourceCameras || [];
-      const camera = sourceCameras[0]
-        ? topology.cameras.find(c => c.deviceId === sourceCameras[0] || c.name === sourceCameras[0])
+      const cameraRef = sourceCameras[0];
+      const camera = cameraRef
+        ? topology.cameras.find(c =>
+            c.deviceId === cameraRef ||
+            c.name === cameraRef ||
+            c.name.toLowerCase() === cameraRef.toLowerCase()
+          )
         : null;
+
+      this.console.log(`[Discovery] Processing zone "${zone.name}" from camera ref="${cameraRef}"`);
+      if (camera) {
+        this.console.log(`[Discovery] Matched camera: ${camera.name} (${camera.deviceId})`);
+      } else if (cameraRef) {
+        this.console.warn(`[Discovery] No camera matched for zone source ref="${cameraRef}"`);
+      }
 
       // Create zone polygon WITHIN the camera's field of view
       let polygon: { x: number; y: number }[] = [];
       const timestamp = Date.now();
 
       if (camera?.floorPlanPosition) {
-        // Get camera's FOV direction and range (cast to any for flexible access)
+        // Get camera's FOV direction (cast to any for flexible access)
         const fov = (camera.fov || { mode: 'simple', angle: 90, direction: 0, range: 80 }) as any;
         const direction = fov.direction || 0;
-        const range = fov.range || 80;
         const fovAngle = fov.angle || 90;
+
+        // Get floor plan scale (pixels per foot)
+        const floorPlanScale = topology.floorPlanScale || 5;
 
         // Convert direction to radians (0 = up/north, 90 = right/east)
         const dirRad = (direction - 90) * Math.PI / 180;
         const halfFov = (fovAngle / 2) * Math.PI / 180;
 
-        // Count existing zones from this camera to offset new ones
-        const existingFromCamera = (topology.drawnZones || []).filter((z: any) =>
-          z.linkedCameras?.includes(sourceCameras[0])
-        ).length;
-
-        // Create a wedge-shaped zone within the camera's FOV
-        // Offset based on existing zones to avoid overlap
-        const innerRadius = range * 0.3 + existingFromCamera * 20;
-        const outerRadius = range * 0.8 + existingFromCamera * 20;
-
-        // Use a portion of the FOV for each zone
-        const zoneSpread = halfFov * 0.7; // 70% of half FOV
-
         const camX = camera.floorPlanPosition.x;
         const camY = camera.floorPlanPosition.y;
 
-        // Create arc polygon (wedge shape)
+        // Use distanceFeet from the zone metadata for accurate positioning
+        const zoneData = zone as any;
+        const distanceFeet = zoneData.distanceFeet || 40; // Default 40ft if not set
+        const distanceInPixels = distanceFeet * floorPlanScale;
+
+        // Zone size based on coverage (larger coverage = wider zone)
+        const zoneWidthFeet = Math.sqrt(zone.coverage) * 30; // e.g., 50% coverage = ~21ft wide
+        const zoneWidthPixels = zoneWidthFeet * floorPlanScale;
+        const zoneDepthPixels = (zone.coverage * 20) * floorPlanScale; // Depth based on coverage
+
+        // Use bounding box for horizontal positioning if available
+        const bbox = zone.boundingBox; // [x, y, width, height] normalized 0-1
+
+        let angleStart: number;
+        let angleEnd: number;
+        let innerRadius: number;
+        let outerRadius: number;
+
+        if (bbox && bbox.length >= 4) {
+          // Map bounding box X to angle within FOV
+          const bboxLeft = bbox[0];
+          const bboxRight = bbox[0] + bbox[2];
+          angleStart = dirRad + (bboxLeft - 0.5) * 2 * halfFov;
+          angleEnd = dirRad + (bboxRight - 0.5) * 2 * halfFov;
+
+          // Use distanceFeet for depth, with a spread based on coverage
+          innerRadius = Math.max(distanceInPixels - zoneDepthPixels / 2, 10);
+          outerRadius = distanceInPixels + zoneDepthPixels / 2;
+
+          this.console.log(`[Discovery] Zone "${zone.name}" at ${distanceFeet}ft using bbox [${bbox.join(',')}]`);
+        } else {
+          // Fallback: wedge-shaped zone covering portion of FOV
+          const existingFromCamera = (topology.drawnZones || []).filter((z: any) =>
+            z.linkedCameras?.includes(sourceCameras[0])
+          ).length;
+
+          // Spread horizontally based on existing zones
+          const offset = (existingFromCamera % 3 - 1) * halfFov * 0.5;
+          angleStart = dirRad + offset - halfFov * 0.3;
+          angleEnd = dirRad + offset + halfFov * 0.3;
+
+          // Use distanceFeet for depth
+          innerRadius = Math.max(distanceInPixels - zoneDepthPixels / 2, 10);
+          outerRadius = distanceInPixels + zoneDepthPixels / 2;
+
+          this.console.log(`[Discovery] Zone "${zone.name}" at ${distanceFeet}ft using fallback spread`);
+        }
+
+        // Create arc polygon
         const steps = 8;
-        // Inner arc (from left to right)
+        // Inner arc (from start angle to end angle)
         for (let i = 0; i <= steps; i++) {
-          const angle = dirRad - zoneSpread + (zoneSpread * 2 * i / steps);
+          const angle = angleStart + (angleEnd - angleStart) * i / steps;
           polygon.push({
             x: camX + Math.cos(angle) * innerRadius,
             y: camY + Math.sin(angle) * innerRadius,
           });
         }
-        // Outer arc (from right to left)
+        // Outer arc (from end angle to start angle)
         for (let i = steps; i >= 0; i--) {
-          const angle = dirRad - zoneSpread + (zoneSpread * 2 * i / steps);
+          const angle = angleStart + (angleEnd - angleStart) * i / steps;
           polygon.push({
             x: camX + Math.cos(angle) * outerRadius,
             y: camY + Math.sin(angle) * outerRadius,
           });
         }
 
-        this.console.log(`[Discovery] Creating zone "${zone.name}" in ${camera.name}'s FOV: dir=${direction}°`);
+        this.console.log(`[Discovery] Creating zone "${zone.name}" at ${distanceFeet}ft (${distanceInPixels}px) from ${camera.name}`);
       } else {
         // Fallback: rectangular zone at default location
         const centerX = 300 + (topology.drawnZones?.length || 0) * 120;
@@ -2004,8 +2123,15 @@ export class SpatialAwarenessPlugin extends ScryptedDeviceBase
       const globalZoneType = this.mapZoneTypeToGlobalType(zone.type);
       const cameraZones: CameraZoneMapping[] = sourceCameras
         .map(camRef => {
-          const cam = topology.cameras.find(c => c.deviceId === camRef || c.name === camRef);
-          if (!cam) return null;
+          const cam = topology.cameras.find(c =>
+            c.deviceId === camRef ||
+            c.name === camRef ||
+            c.name.toLowerCase() === camRef.toLowerCase()
+          );
+          if (!cam) {
+            this.console.warn(`[Discovery] GlobalZone: No camera matched for ref="${camRef}"`);
+            return null;
+          }
           return {
             cameraId: cam.deviceId,
             zone: [[0, 0], [100, 0], [100, 100], [0, 100]] as ClipPath, // Full frame default
